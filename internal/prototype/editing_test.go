@@ -208,19 +208,18 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	}
 	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "memory")
 	before := string(app.left.buf.Bytes())
-	leftName, rightName := app.left.buf.GetName(), app.right.buf.GetName()
+	rightName := app.right.buf.GetName()
 	savePath := filepath.Join(t.TempDir(), "must-not-exist")
 	app.handle(key(tcell.KeyCtrlS, 0, tcell.ModCtrl))
-	if !strings.Contains(app.currentStatus(), "Save is unavailable") {
-		t.Fatalf("Ctrl+S rejection was not explained: %q", app.currentStatus())
+	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "Filename:") {
+		t.Fatalf("Ctrl+S did not ask for an unnamed buffer's filename: %q", app.currentStatus())
 	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	app.handle(key(tcell.KeyCtrlO, 0, tcell.ModCtrl))
-	if !strings.Contains(app.currentStatus(), "Open is unavailable") {
-		t.Fatalf("Ctrl+O rejection was not explained: %q", app.currentStatus())
+	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "open ") {
+		t.Fatalf("Ctrl+O did not prompt for a path: %q", app.currentStatus())
 	}
-	if action.InfoBar.HasPrompt {
-		t.Fatal("rejected Open action displayed a filename prompt")
-	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	for _, rejected := range []struct {
 		key  tcell.Key
 		mods tcell.ModMask
@@ -228,7 +227,6 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	}{
 		{tcell.KeyF2, tcell.ModNone, "Save is unavailable"},
 		{tcell.KeyCtrlB, tcell.ModCtrl, "ShellMode is unavailable"},
-		{tcell.KeyCtrlT, tcell.ModCtrl, "AddTab is unavailable"},
 	} {
 		app.handle(key(rejected.key, 0, rejected.mods))
 		if !strings.Contains(app.currentStatus(), rejected.want) {
@@ -236,8 +234,15 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 		}
 	}
 	if got := string(app.left.buf.Bytes()); got != before {
-		t.Fatalf("rejected file/shell/new-buffer action changed buffer: %q", got)
+		t.Fatalf("rejected file/shell action changed buffer: %q", got)
 	}
+	oldRight := app.right.buf
+	app.handle(key(tcell.KeyCtrlT, 0, tcell.ModCtrl))
+	app.handle(key(tcell.KeyRune, 'n', tcell.ModNone))
+	if app.right.buf != oldRight || app.left.buf == oldRight || app.left.buf.GetName() != "No name" || app.left.buf.LinesNum() != 1 {
+		t.Fatal("Ctrl+T did not replace only the focused pane with a new unnamed buffer")
+	}
+	commandBaseline := string(app.left.buf.Bytes())
 	app.handle(key(tcell.KeyCtrlE, 0, tcell.ModCtrl))
 	if action.InfoBar == nil || !action.InfoBar.HasPrompt {
 		t.Fatal("Ctrl+E did not open the command bar")
@@ -250,14 +255,14 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 		app.handle(key(tcell.KeyRune, r, tcell.ModNone))
 	}
 	app.handle(key(tcell.KeyEnter, 0, tcell.ModNone))
-	if got := string(app.left.buf.Bytes()); got != before {
-		t.Fatalf("rejected save changed buffer: %q, before %q", got, before)
+	if got := string(app.left.buf.Bytes()); got != commandBaseline {
+		t.Fatalf("rejected save changed buffer: %q, before %q", got, commandBaseline)
 	}
 	if _, err := os.Stat(savePath); !os.IsNotExist(err) {
 		t.Fatalf("rejected save created a file, stat error=%v", err)
 	}
-	if app.left.buf.GetName() != leftName || app.right.buf.GetName() != rightName {
-		t.Fatal("rejected file action changed a buffer name")
+	if app.left.buf.GetName() != "No name" || app.right.buf.GetName() != rightName {
+		t.Fatalf("new document did not preserve the opposite pane: left=%q right=%q", app.left.buf.GetName(), app.right.buf.GetName())
 	}
 	if !strings.Contains(app.currentStatus(), "Command unavailable") {
 		t.Fatalf("unsafe command was not rejected visibly: %q", app.currentStatus())
@@ -347,7 +352,7 @@ func TestReservedKeysRejectConfiguredUnsafeActions(t *testing.T) {
 		want string
 	}{
 		{tcell.KeyCtrlQ, "Save is unavailable"},
-		{tcell.KeyCtrlG, "Open is unavailable"},
+		{tcell.KeyCtrlG, "OpenFile is unavailable"},
 		{tcell.KeyCtrlE, "ShellMode is unavailable"},
 	} {
 		if quit := app.handle(key(tc.key, 0, tcell.ModCtrl)); quit {

@@ -34,7 +34,15 @@ type pane struct {
 	width      int
 }
 
-// App owns the two transient buffers, panes, alignment, and shared viewport.
+type quitFlow struct {
+	panes        []*pane
+	paneIndex    int
+	saves        []*pane
+	saveIndex    int
+	awaitingSave bool
+}
+
+// App owns the two Micro buffers, panes, alignment, and shared viewport.
 type App struct {
 	left, right     pane
 	layout          viewport.Layout
@@ -58,6 +66,8 @@ type App struct {
 	diffErr         error
 	handlingPaste   bool
 	blockedSequence string
+	quitFlow        *quitFlow
+	quitComplete    bool
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
@@ -69,6 +79,15 @@ func New(s tcell.Screen, configDir string) (*App, error) {
 
 // NewWithDebounce constructs the app with an optional CLI debounce override.
 func NewWithDebounce(s tcell.Screen, configDir string, cliDebounceMS *int) (*App, error) {
+	return NewWithFiles(s, configDir, cliDebounceMS)
+}
+
+// NewWithFiles constructs the app and optionally loads one file into the left
+// pane and a second file into the right pane.
+func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ...string) (*App, error) {
+	if len(paths) > 2 {
+		return nil, errors.New("mdiff accepts at most two file paths")
+	}
 	if err := setConfigDir(configDir); err != nil {
 		return nil, err
 	}
@@ -87,7 +106,7 @@ func NewWithDebounce(s tcell.Screen, configDir string, cliDebounceMS *int) (*App
 		return nil, err
 	}
 	// Command history belongs to Micro's command bar, which mdiff does not
-	// expose. Keep its shutdown path inside the prototype's no-write policy.
+	// expose, so do not persist that unrelated history file.
 	config.GlobalSettings["savehistory"] = false
 	if ulua.L != nil {
 		ulua.L.Close()
@@ -125,8 +144,17 @@ func NewWithDebounce(s tcell.Screen, configDir string, cliDebounceMS *int) (*App
 	action.InitBindings() // Patched Micro helper reads bindings without creating one.
 	action.InitCommands()
 
-	leftBuf := buffer.NewBufferFromString("", "", buffer.BTTransient)
-	rightBuf := buffer.NewBufferFromString("", "", buffer.BTTransient)
+	leftBuf, err := newPaneBuffer(paths, 0)
+	if err != nil {
+		cleanupFailedBuffers(paintScreen, surface, s)
+		return nil, fmt.Errorf("open left pane: %w", err)
+	}
+	rightBuf, err := newPaneBuffer(paths, 1)
+	if err != nil {
+		leftBuf.Close()
+		cleanupFailedBuffers(paintScreen, surface, s)
+		return nil, fmt.Errorf("open right pane: %w", err)
+	}
 	for _, b := range []*buffer.Buffer{leftBuf, rightBuf} {
 		b.Settings["scrollbar"] = false
 		b.Settings["diffgutter"] = false
@@ -149,6 +177,40 @@ func NewWithDebounce(s tcell.Screen, configDir string, cliDebounceMS *int) (*App
 	rightBuf.SetChangeHandler(func(change buffer.TextChange) { app.textChanged(viewport.Right, change) })
 	app.resize(s.Size())
 	return app, nil
+}
+
+func newPaneBuffer(paths []string, side int) (*buffer.Buffer, error) {
+	if side < len(paths) {
+		return buffer.NewBufferFromFileUnshared(paths[side], buffer.BTDefault)
+	}
+	return buffer.NewBufferFromString("", "", buffer.BTDefault), nil
+}
+
+func cleanupFailedBuffers(paintScreen, surface tcell.SimulationScreen, terminal tcell.Screen) {
+	if action.InfoBar != nil {
+		action.InfoBar.Close()
+		action.InfoBar = nil
+	}
+	if buffer.LogBuf != nil {
+		buffer.LogBuf.Close()
+		buffer.LogBuf = nil
+	}
+	if paintScreen != nil {
+		paintScreen.Fini()
+	}
+	if surface != nil {
+		surface.Fini()
+	}
+	if terminal != nil {
+		terminal.Fini()
+		if screen.Screen == terminal {
+			screen.Screen = nil
+		}
+	}
+	if ulua.L != nil {
+		ulua.L.Close()
+		ulua.L = nil
+	}
 }
 
 func configuredDebounce(cliMS *int) (time.Duration, error) {
@@ -259,7 +321,15 @@ func Run(configDir string) error {
 
 // RunWithDebounce uses a validated CLI override when present.
 func RunWithDebounce(configDir string, debounceMS *int) error {
-	app, err := NewWithDebounce(nil, configDir, debounceMS)
+	return RunWithFiles(configDir, debounceMS)
+}
+
+// RunWithFiles starts mdiff with zero to two initial file paths.
+func RunWithFiles(configDir string, debounceMS *int, paths ...string) error {
+	if len(paths) > 2 {
+		return errors.New("mdiff accepts at most two file paths")
+	}
+	app, err := NewWithFiles(nil, configDir, debounceMS, paths...)
 	if err != nil {
 		return err
 	}
@@ -286,8 +356,7 @@ func RunWithDebounce(configDir string, debounceMS *int) error {
 	return RunWithSignals(ctx, app, events)
 }
 
-// Close uses the transient Micro finalizer and restores the terminal exactly
-// once. Transient Fini intentionally has no serializer or backup path.
+// Close releases both Micro buffers and restores the terminal exactly once.
 func (a *App) Close() {
 	if a.closed {
 		return
@@ -472,12 +541,17 @@ func (a *App) handle(event tcell.Event) bool {
 		a.handleMouse(e)
 		return false
 	case *tcell.EventKey:
+		if e.Key() == tcell.KeyCtrlQ && action.InfoBar != nil && action.InfoBar.HasPrompt {
+			a.blockedSequence = ""
+			a.handlePromptEvent(e)
+			return a.quitComplete
+		}
 		if a.rejectConflictingReservedBinding(e) {
 			return false
 		}
 		if e.Key() == tcell.KeyCtrlQ {
 			a.blockedSequence = ""
-			return true
+			return a.requestQuit()
 		}
 		if e.Key() == tcell.KeyCtrlG {
 			a.blockedSequence = ""
@@ -492,12 +566,32 @@ func (a *App) handle(event tcell.Event) bool {
 		if action.InfoBar != nil && action.InfoBar.HasPrompt {
 			a.blockedSequence = ""
 			a.handlePromptEvent(e)
-			return false
+			return a.quitComplete
 		}
 		if e.Key() == tcell.KeyCtrlW {
 			a.focus = 1 - a.focus
 			a.setFocus()
 			a.ensureCursorVisible()
+			return false
+		}
+		if a.blockedSequence != "" && a.handleRejectedSequence(e) {
+			return false
+		}
+		if e.Key() == tcell.KeyCtrlO {
+			a.blockedSequence = ""
+			a.focusedPane().h.OpenFile()
+			return false
+		}
+		if e.Key() == tcell.KeyCtrlS {
+			a.blockedSequence = ""
+			p := a.focusedPane()
+			p.h.SaveWithExternalChangeCheck("Save", nil)
+			p.buf.UpdateRules()
+			return false
+		}
+		if e.Key() == tcell.KeyCtrlT {
+			a.blockedSequence = ""
+			a.newFocusedDocument()
 			return false
 		}
 		if a.handleRejectedSequence(e) {
@@ -545,8 +639,131 @@ func (a *App) handlePromptEvent(event tcell.Event) {
 		return
 	}
 	action.InfoBar.HandleEvent(event)
+	a.syncFocusedBuffer()
 	a.focusedPane().buf.UpdateRules()
 	a.ensureCursorVisible()
+	if a.quitFlow != nil && a.quitFlow.awaitingSave && (action.InfoBar == nil || !action.InfoBar.HasPrompt) {
+		a.quitFlow = nil
+	}
+}
+
+func (a *App) requestQuit() bool {
+	if a.quitFlow != nil {
+		return false
+	}
+	a.quitComplete = false
+	flow := &quitFlow{panes: a.panes()}
+	a.quitFlow = flow
+	a.advanceQuitDecisions(flow)
+	return a.quitComplete
+}
+
+func (a *App) advanceQuitDecisions(flow *quitFlow) {
+	if a.quitFlow != flow {
+		return
+	}
+	for flow.paneIndex < len(flow.panes) {
+		p := flow.panes[flow.paneIndex]
+		flow.paneIndex++
+		if !p.buf.Modified() || p.buf.Shared() {
+			continue
+		}
+		if autosave, _ := config.GlobalSettings["autosave"].(float64); autosave > 0 && p.buf.Path != "" {
+			flow.saves = append(flow.saves, p)
+			continue
+		}
+		action.InfoBar.YNPrompt("Save changes to "+p.buf.GetName()+" before closing? (y,n,esc)", func(yes, canceled bool) {
+			if a.quitFlow != flow {
+				return
+			}
+			if canceled {
+				a.quitFlow = nil
+				return
+			}
+			if yes {
+				flow.saves = append(flow.saves, p)
+			}
+			a.advanceQuitDecisions(flow)
+		})
+		return
+	}
+	a.saveForQuit(flow)
+}
+
+func (a *App) saveForQuit(flow *quitFlow) {
+	if a.quitFlow != flow {
+		return
+	}
+	if flow.saveIndex >= len(flow.saves) {
+		a.quitFlow = nil
+		a.quitComplete = true
+		return
+	}
+	p := flow.saves[flow.saveIndex]
+	flow.saveIndex++
+	flow.awaitingSave = true
+	p.h.SaveWithExternalChangeCheck("Quit", func() {
+		if a.quitFlow != flow {
+			return
+		}
+		flow.awaitingSave = false
+		a.saveForQuit(flow)
+	})
+	if a.quitFlow == flow && flow.awaitingSave && (action.InfoBar == nil || !action.InfoBar.HasPrompt) {
+		// Micro's save callback runs only after a successful write. A synchronous
+		// failure leaves the buffer open and reports through InfoBar.
+		a.quitFlow = nil
+	}
+}
+
+func (a *App) newFocusedDocument() {
+	p := a.focusedPane()
+	reset := func() {
+		b := buffer.NewBufferFromString("", "", buffer.BTDefault)
+		anchor := a.captureAnchor()
+		p.h.OpenBuffer(b)
+		a.syncPaneBuffer(p)
+		a.rebuildWithAnchor(anchor)
+	}
+	if p.buf.Modified() && !p.buf.Shared() {
+		action.InfoBar.YNPrompt("Save changes to "+p.buf.GetName()+" before closing? (y,n,esc)", func(yes, canceled bool) {
+			if canceled {
+				return
+			}
+			if yes {
+				p.h.SaveWithExternalChangeCheck("Open", reset)
+				return
+			}
+			reset()
+		})
+		return
+	}
+	reset()
+}
+
+func (a *App) syncPaneBuffer(p *pane) {
+	if p == nil || p.h == nil || p.h.Buf == nil || p.buf == p.h.Buf {
+		return
+	}
+	p.buf = p.h.Buf
+	p.statusView.Buf = p.buf
+	p.buf.Settings["scrollbar"] = false
+	p.buf.Settings["diffgutter"] = false
+	side := viewport.Left
+	if p == &a.right {
+		side = viewport.Right
+	}
+	p.buf.SetChangeHandler(func(change buffer.TextChange) { a.textChanged(side, change) })
+	p.buf.UpdateRules()
+}
+
+func (a *App) syncFocusedBuffer() {
+	p := a.focusedPane()
+	if p != nil && p.h != nil && p.buf != p.h.Buf {
+		anchor := a.captureAnchor()
+		a.syncPaneBuffer(p)
+		a.rebuildWithAnchor(anchor)
+	}
 }
 
 func (a *App) showHelp() {
@@ -562,7 +779,7 @@ func (a *App) showHelp() {
 func (a *App) rejectConflictingReservedBinding(event *tcell.EventKey) bool {
 	keyName := action.BufferKeyName(event)
 	if rejected, _, prefix := action.RejectedBufferSequenceState("<" + keyName + ">"); prefix {
-		a.blockedSequence = ""
+		a.blockedSequence = "<" + keyName + ">"
 		if rejected == "" {
 			rejected = "configured key sequence"
 		}
@@ -637,12 +854,8 @@ func (a *App) reportRejectedAction(binding string) {
 		return
 	}
 	name := strings.TrimSpace(strings.NewReplacer("|", ", ", "&", ", ", ",", ", ").Replace(binding))
-	if strings.Contains(name, "Save") {
-		action.InfoBar.Error("Save is unavailable: mdiff buffers exist only in memory")
-		return
-	}
-	if strings.Contains(name, "OpenFile") {
-		action.InfoBar.Error("Open is unavailable: mdiff edits exactly two in-memory buffers")
+	if strings.Contains(name, "SaveAll") {
+		action.InfoBar.Error("Save All is unavailable: mdiff has exactly two independently focused panes")
 		return
 	}
 	action.InfoBar.Error(name + " is unavailable in mdiff")

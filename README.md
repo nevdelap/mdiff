@@ -1,10 +1,9 @@
 # mdiff
 
-`mdiff` is a standalone Go CLI prototype for a terminal-based, side-by-side diff
-editor. It reuses Micro's in-memory editing and rendering code and maps both
-panes onto one diff-aware viewport so insertions, deletions, and wrapped lines
-remain aligned. The current prototype keeps both buffers in memory and does not
-open or save files.
+`mdiff` is a standalone Go CLI for a terminal-based, side-by-side diff editor.
+It reuses Micro's editing and rendering code and maps both panes onto one
+diff-aware viewport so insertions, deletions, and wrapped lines remain aligned.
+Each pane has an independent Micro buffer and file identity.
 
 ## Run
 
@@ -20,12 +19,23 @@ The command can also be run directly:
 go run ./cmd/mdiff
 ```
 
-Run without file arguments. Paste text into either pane, use `F6` to switch
-panes, `Ctrl-Up`/`Ctrl-Down` or the mouse wheel to scroll both panes together,
-and `Alt-Up`/`Alt-Down` to jump between differences. `Tab` keeps its Micro
-indentation/completion behavior. Press `Ctrl-Q` to exit. Micro settings and
-colorschemes are read from the user's Micro configuration; plugins are not
-loaded.
+Pass zero, one, or two file paths to start with empty panes or load files from
+left to right:
+
+```sh
+mdiff [LEFT [RIGHT]]
+just run -- left.txt right.txt
+go run ./cmd/mdiff left.txt right.txt
+```
+
+`Ctrl+O` opens a file in the focused pane, `Ctrl+S` saves it, and `Ctrl+T`
+replaces it with a new unnamed document. Dirty buffers use Micro's
+save/discard/cancel prompts. Paste text into either pane, use `Ctrl+W` to switch
+panes, `Ctrl+Up`/`Ctrl+Down` or the mouse wheel to scroll both panes together,
+and `Alt+Up`/`Alt+Down` to jump between differences. `Tab` keeps its Micro
+indentation/completion behavior. Press `Ctrl+Q` to exit. Micro settings and
+colorschemes are read from the user's Micro configuration; compatible plugins
+are not loaded yet.
 
 Diff updates use an 80 ms debounce by default. Set
 `"mdiff": {"diff-debounce-ms": 100}` in Micro's `settings.json` or pass

@@ -293,6 +293,17 @@ type Buffer struct {
 // would otherwise be (start of file, or saved cursor position if `savecursor` is
 // enabled)
 func NewBufferFromFileWithCommand(path string, btype BufType, cmd Command) (*Buffer, error) {
+	return newBufferFromFileWithCommand(path, btype, cmd, true)
+}
+
+// NewBufferFromFileUnshared opens a file without reusing an already-open
+// buffer for the same path. It is intended for applications that present the
+// same document in independent editing contexts.
+func NewBufferFromFileUnshared(path string, btype BufType) (*Buffer, error) {
+	return newBufferFromFileWithCommand(path, btype, emptyCommand, false)
+}
+
+func newBufferFromFileWithCommand(path string, btype BufType, cmd Command, share bool) (*Buffer, error) {
 	var err error
 	filename := path
 	if config.GetGlobalOption("parsecursor").(bool) && cmd.StartCursor.X == -1 && cmd.StartCursor.Y == -1 {
@@ -332,11 +343,11 @@ func NewBufferFromFileWithCommand(path string, btype BufType, cmd Command) (*Buf
 	var buf *Buffer
 	if errors.Is(err, fs.ErrNotExist) {
 		// File does not exist -- create an empty buffer with that name
-		buf = NewBufferFromString("", filename, btype)
+		buf = newBuffer(strings.NewReader(""), 0, filename, btype, emptyCommand, share)
 	} else if err != nil {
 		return nil, err
 	} else {
-		buf = NewBuffer(file, util.FSize(file), filename, btype, cmd)
+		buf = newBuffer(file, util.FSize(file), filename, btype, cmd, share)
 		if buf == nil {
 			return nil, errors.New("could not open file")
 		}
@@ -375,6 +386,10 @@ func NewBufferFromString(text, path string, btype BufType) *Buffer {
 // Places the cursor at startcursor. If startcursor is -1, -1 places the
 // cursor at an autodetected location (based on savecursor or :LINE:COL)
 func NewBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command) *Buffer {
+	return newBuffer(r, size, path, btype, cmd, true)
+}
+
+func newBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command, share bool) *Buffer {
 	var absPath string
 	var err error
 	isTransient := btype.Kind == BTTransient.Kind
@@ -388,7 +403,7 @@ func NewBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command)
 	b := new(Buffer)
 
 	found := false
-	if len(path) > 0 {
+	if share && len(path) > 0 {
 		for _, buf := range OpenBuffers {
 			if buf.AbsPath == absPath && buf.Type != BTInfo {
 				found = true

@@ -977,7 +977,65 @@ func (h *BufPane) SaveCB(action string, callback func()) bool {
 
 // Save the buffer to disk
 func (h *BufPane) Save() bool {
-	return h.SaveCB("Save", nil)
+	return h.SaveWithExternalChangeCheck("Save", nil)
+}
+
+// SaveWithExternalChangeCheck applies Micro's reload setting before saving a
+// buffer whose file changed on disk. Yes reloads the file and completes the
+// pending callback; No saves the in-memory buffer and then completes it; Escape
+// cancels both the save and callback.
+func (h *BufPane) SaveWithExternalChangeCheck(action string, callback func()) bool {
+	save := func() bool { return h.SaveCB(action, callback) }
+	finishReload := func() {
+		if callback != nil {
+			callback()
+		}
+	}
+	reload := func() bool {
+		if err := h.Buf.ReOpen(); err != nil {
+			InfoBar.Error(err)
+			return false
+		}
+		h.Relocate()
+		return true
+	}
+	if !h.Buf.ExternallyModified() || h.Buf.ReloadDisabled {
+		return save()
+	}
+
+	switch h.getReloadSetting() {
+	case "prompt":
+		InfoBar.YNPrompt("The file on disk has changed. Reload file? (y,n,esc)", func(yes, canceled bool) {
+			if canceled {
+				h.Buf.DisableReload()
+				h.Buf.UpdateModTime()
+				return
+			}
+			if yes {
+				if !reload() {
+					return
+				}
+				finishReload()
+			} else {
+				_ = h.Buf.UpdateModTime()
+				save()
+			}
+		})
+		return false
+	case "auto":
+		if !reload() {
+			return false
+		}
+		finishReload()
+		return true
+	case "disabled":
+		h.Buf.DisableReload()
+	default:
+		InfoBar.Message("Invalid reload setting")
+		return false
+	}
+
+	return save()
 }
 
 // SaveAsCB performs a save as and does a callback at the very end (after all prompts have been resolved)
@@ -1920,7 +1978,7 @@ func (h *BufPane) closePrompt(action string, callback func()) {
 		if !canceled && !yes {
 			callback()
 		} else if !canceled && yes {
-			h.SaveCB(action, callback)
+			h.SaveWithExternalChangeCheck(action, callback)
 		}
 	})
 }
@@ -1930,7 +1988,7 @@ func (h *BufPane) Quit() bool {
 	if h.Buf.Modified() && !h.Buf.Shared() {
 		if config.GlobalSettings["autosave"].(float64) > 0 && h.Buf.Path != "" {
 			// autosave on means we automatically save when quitting
-			h.SaveCB("Quit", func() {
+			h.SaveWithExternalChangeCheck("Quit", func() {
 				h.ForceQuit()
 			})
 		} else {

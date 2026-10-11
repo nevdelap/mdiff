@@ -1,7 +1,6 @@
 package prototype
 
 import (
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,7 +12,7 @@ import (
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
-func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
+func TestSimulationEditingAlignmentScrollResize(t *testing.T) {
 	configDir := t.TempDir()
 	sim := tcell.NewSimulationScreen("")
 	if err := sim.Init(); err != nil {
@@ -26,8 +25,8 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 	}
 	defer app.Close()
 
-	if app.left.buf.Type.Kind != buffer.BTTransient.Kind || app.right.buf.Type.Kind != buffer.BTTransient.Kind {
-		t.Fatal("both panels must use Micro transient buffers")
+	if app.left.buf.Type.Kind != buffer.BTDefault.Kind || app.right.buf.Type.Kind != buffer.BTDefault.Kind {
+		t.Fatal("both panels must use Micro default buffers")
 	}
 	if app.left.buf == app.right.buf {
 		t.Fatal("panels unexpectedly share one Micro buffer")
@@ -157,13 +156,7 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 	}
 
 	app.Close()
-	entries, err := os.ReadDir(configDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("transient editor wrote configuration or buffer state: %v", entries)
-	}
+	assertNoPersistedConfigFiles(t, configDir)
 }
 
 func flushDiffForTest(t *testing.T, app *App) {

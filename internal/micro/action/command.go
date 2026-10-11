@@ -303,7 +303,7 @@ func (h *BufPane) OpenCmd(args []string) {
 		filename = strings.Join(args, " ")
 
 		open := func() {
-			b, err := buffer.NewBufferFromFile(filename, buffer.BTDefault)
+			b, err := buffer.NewBufferFromFileUnshared(filename, buffer.BTDefault)
 			if err != nil {
 				InfoBar.Error(err)
 				return

@@ -78,10 +78,16 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 		t.Fatalf("resize redraw did not place a visible cursor inside the new terminal bounds; cursor sequences=%q output tail=%q", cursorPositionBeforeShow.FindAllSubmatch(resized[resizeStart:], -1), tail(resized[resizeStart:], 500))
 	}
 
-	writePTY(t, terminal, []byte{0x11}) // Ctrl-Q.
+	quitStart := transcript.mark()
+	writePTY(t, terminal, []byte{0x11}) // Ctrl-Q prompts for each modified unnamed buffer.
+	transcript.waitForScreenSince(t, quitStart, "No name")
+	writePTY(t, terminal, []byte{'n'})
+	secondQuitPrompt := transcript.mark()
+	transcript.waitForScreenSince(t, secondQuitPrompt, "No name")
+	writePTY(t, terminal, []byte{'n'}) // Discard both and exit.
 	waitProcess(t, cmd)
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
-	assertConfigDirEmpty(t, configDir)
+	assertNoPersistedConfigFiles(t, configDir)
 }
 
 func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
@@ -105,7 +111,199 @@ func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
-	assertConfigDirEmpty(t, configDir)
+	assertNoPersistedConfigFiles(t, configDir)
+}
+
+func TestCLIRejectsMoreThanTwoPathsBeforeTerminalInitialization(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	cmd := exec.Command(binary, "left.txt", "right.txt", "extra.txt")
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("CLI accepted three paths: %q", output)
+	}
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+		t.Fatalf("three-path exit = %v, want status 2", err)
+	}
+	if !bytes.Contains(output, []byte("at most two file paths")) || bytes.Contains(output, []byte("\x1b[")) {
+		t.Fatalf("three-path validation did not exit before terminal startup: %q", output)
+	}
+	entries, err := os.ReadDir(configDir)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("three-path rejection initialized Micro or wrote config: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestPTYFileArgumentsOpenSaveAndOpenOnlyFocusedPane(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	filesDir := t.TempDir()
+	leftPath := filepath.Join(filesDir, "left.txt")
+	rightPath := filepath.Join(filesDir, "right.txt")
+	openPath := filepath.Join(filesDir, "opened.txt")
+	for path, contents := range map[string]string{
+		leftPath:  "LEFT-ORIGINAL",
+		rightPath: "RIGHT-ORIGINAL",
+		openPath:  "OPENED-MARKER",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command(binary, leftPath, rightPath)
+	cmd.Env = append(os.Environ(),
+		"TERM=xterm-256color",
+		"MICRO_CONFIG_HOME="+configDir,
+		"MICRO_TRUECOLOR=0",
+	)
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 60})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := capturePTY(t, terminal)
+	defer func() { _ = terminal.Close() }()
+	transcript.waitFor(t, []byte("^Q Quit"))
+	transcript.waitForScreenSince(t, 0, "LEFT-ORIGINAL")
+	transcript.waitForScreenSince(t, 0, "RIGHT-ORIGINAL")
+
+	writePTY(t, terminal, []byte{0x01}) // Ctrl+A selects the focused buffer.
+	writePTY(t, terminal, []byte("\x1b[200~LEFT-SAVED\x1b[201~"))
+	writePTY(t, terminal, []byte{0x13}) // Ctrl+S saves only the left pane.
+	waitForFileContents(t, leftPath, "LEFT-SAVED\n")
+	if got, err := os.ReadFile(rightPath); err != nil || string(got) != "RIGHT-ORIGINAL" {
+		t.Fatalf("saving left pane changed right file: contents=%q err=%v", got, err)
+	}
+
+	openStart := transcript.mark()
+	writePTY(t, terminal, []byte{0x0f}) // Ctrl+O opens into the focused pane.
+	writePTY(t, terminal, []byte(openPath))
+	writePTY(t, terminal, []byte{0x0d})
+	transcript.waitForScreenSince(t, openStart, "OPENED-MARKER")
+	writePTY(t, terminal, []byte{0x11}) // Ctrl+Q.
+	waitProcess(t, cmd)
+	transcript.waitFor(t, []byte("\x1b[?1049l"))
+	assertNoPersistedConfigFiles(t, configDir)
+}
+
+func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	leftPath, rightPath := writeWorkflowFiles(t, "left.txt", "LEFT-OLD\n", "right.txt", "RIGHT-OLD\n")
+	cmd := exec.Command(binary, leftPath, rightPath)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 12, Cols: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := capturePTY(t, terminal)
+	defer func() { _ = terminal.Close() }()
+	transcript.waitFor(t, []byte("^Q Quit"))
+
+	writePTY(t, terminal, []byte{0x01}) // Ctrl+A selects all in the left pane.
+	writePTY(t, terminal, []byte("\x1b[200~LEFT-NEW\n\x1b[201~"))
+	writePTY(t, terminal, []byte{0x17}) // Ctrl+W switches to the right pane.
+	writePTY(t, terminal, []byte{0x01})
+	writePTY(t, terminal, []byte("\x1b[200~RIGHT-NEW\n\x1b[201~"))
+	writePTY(t, terminal, []byte{0x17}) // Make left the first quit decision.
+	firstPrompt := transcript.mark()
+	writePTY(t, terminal, []byte{0x11}) // Ctrl+Q.
+	transcript.waitForScreenSince(t, firstPrompt, "before")
+	writePTY(t, terminal, []byte{'y'}) // Save left.
+	secondPrompt := transcript.mark()
+	transcript.waitForScreenSince(t, secondPrompt, "before")
+	writePTY(t, terminal, []byte{'n'}) // Discard right.
+	waitProcess(t, cmd)
+	transcript.waitFor(t, []byte("\x1b[?1049l"))
+	if got := readWorkflowFile(t, leftPath); got != "LEFT-NEW\n" {
+		t.Fatalf("left file after prompted quit=%q", got)
+	}
+	if got := readWorkflowFile(t, rightPath); got != "RIGHT-OLD\n" {
+		t.Fatalf("discarded right file changed: %q", got)
+	}
+	assertNoPersistedConfigFiles(t, configDir)
+}
+
+func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	leftPath := filepath.Join(t.TempDir(), "left.txt")
+	if err := os.WriteFile(leftPath, []byte("LEFT-OLD\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binary, leftPath)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 12, Cols: 120})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := capturePTY(t, terminal)
+	defer func() { _ = terminal.Close() }()
+	transcript.waitFor(t, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte{0x01})
+	writePTY(t, terminal, []byte("\x1b[200~LEFT-NEW\n\x1b[201~"))
+
+	firstPrompt := transcript.mark()
+	writePTY(t, terminal, []byte{0x11})
+	transcript.waitForScreenSince(t, firstPrompt, "before")
+	writePTY(t, terminal, []byte{0x1b}) // Cancel the dirty-buffer quit prompt.
+
+	firstPrompt = transcript.mark()
+	writePTY(t, terminal, []byte{0x11})
+	transcript.waitForScreenSince(t, firstPrompt, "before")
+	writePTY(t, terminal, []byte{'n'})
+	waitProcess(t, cmd)
+	transcript.waitFor(t, []byte("\x1b[?1049l"))
+	if got := readWorkflowFile(t, leftPath); got != "LEFT-OLD\n" {
+		t.Fatalf("cancelled quit changed left file: %q", got)
+	}
+	assertNoPersistedConfigFiles(t, configDir)
+}
+
+func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	savePath := filepath.Join(t.TempDir(), "unnamed-save.txt")
+	cmd := exec.Command(binary)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 12, Cols: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript := capturePTY(t, terminal)
+	defer func() { _ = terminal.Close() }()
+	transcript.waitFor(t, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte("\x1b[200~UNNAMED-EDIT\n\x1b[201~"))
+	writePTY(t, terminal, []byte{0x11}) // Ctrl+Q asks about the unnamed buffer.
+	transcript.waitForScreenSince(t, 0, "Save changes to No name")
+	writePTY(t, terminal, []byte{0x11}) // Micro's command prompt binding cancels.
+	secondPrompt := transcript.mark()
+	writePTY(t, terminal, []byte{0x11})
+	transcript.waitForScreenSince(t, secondPrompt, "Save changes to No name")
+	writePTY(t, terminal, []byte{'y'})
+	transcript.waitForScreenSince(t, 0, "Filename:")
+	writePTY(t, terminal, []byte(savePath))
+	writePTY(t, terminal, []byte{0x0d})
+	waitProcess(t, cmd)
+	transcript.waitFor(t, []byte("\x1b[?1049l"))
+	if got := readWorkflowFile(t, savePath); got != "UNNAMED-EDIT\n" {
+		t.Fatalf("saved unnamed buffer=%q", got)
+	}
+	assertNoPersistedConfigFiles(t, configDir)
+}
+
+func waitForFileContents(t *testing.T, path, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		contents, err := os.ReadFile(path)
+		if err == nil && string(contents) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	contents, err := os.ReadFile(path)
+	t.Fatalf("file %q contents=%q err=%v, want %q", path, contents, err, want)
 }
 
 type ptyTranscript struct {
@@ -351,14 +549,20 @@ func hasVisibleCursorInColumnRange(transcript []byte, minCol, maxCol int) bool {
 	return false
 }
 
-func assertConfigDirEmpty(t *testing.T, configDir string) {
+func assertNoPersistedConfigFiles(t *testing.T, configDir string) {
 	t.Helper()
 	entries, err := os.ReadDir(configDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("editor wrote config or buffer state: %v", entries)
+	for _, entry := range entries {
+		if (entry.Name() != "buffers" && entry.Name() != "backups") || !entry.IsDir() {
+			t.Fatalf("editor wrote unexpected configuration or buffer state: %v", entries)
+		}
+		children, err := os.ReadDir(filepath.Join(configDir, entry.Name()))
+		if err != nil || len(children) != 0 {
+			t.Fatalf("editor wrote unexpected files under %s: entries=%v err=%v", entry.Name(), children, err)
+		}
 	}
 }
 

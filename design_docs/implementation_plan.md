@@ -657,7 +657,7 @@ Implementation handoff:
 
 ### TASK-011 - Implement Micro-compatible per-pane file workflows
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -745,6 +745,46 @@ Handoff:
 - Record Micro persistence APIs reused, path/metadata behavior, tested prompts,
   two-pane adaptations, and any remaining differences from Micro with their
   evidence and owner disposition.
+
+Implementation handoff:
+
+- The CLI now accepts zero to two file operands and rejects a third before
+  terminal initialization. One operand opens in the left pane; two open
+  left-to-right. Empty and replacement documents use Micro `BTDefault` buffers.
+- Startup and interactive Open use Micro's file loading, path metadata, file
+  type, encoding, line-ending detection, and prompt flow. Save and Save As use
+  Micro's buffer save path. Ctrl+T replaces the focused pane with a new unnamed
+  Micro buffer and does not create a tab.
+- Micro normally reuses the shared buffer for a path already present in
+  `OpenBuffers`. That conflicts with mdiff's requirement for independent panes,
+  so `NewBufferFromFileUnshared` follows the same Micro loading path while
+  bypassing that reuse. The local Micro `OpenCmd` uses this constructor too.
+- Ctrl+Q follows Micro's modified-buffer workflow for both panes: named buffers
+  use the configured autosave behavior when enabled; otherwise each dirty pane
+  receives a Save/Discard/Cancel decision. Save decisions are collected before
+  any write occurs, so canceling a later pane cannot persist an earlier pane. An
+  active Micro prompt receives Ctrl+Q through Micro's prompt handler, where it
+  cancels that prompt instead of exiting mdiff.
+- Every pane-level save path checks Micro's per-buffer `reload` setting before
+  saving an externally changed file, including Ctrl+S, quit/autosave, dirty
+  Open, and New Tab replacement. The default prompt reloads the on-disk version
+  on Yes and resumes the requested callback; No saves the in-memory version;
+  Escape cancels the pending save and callback. This also protects independent
+  buffers that refer to the same path. Regression tests cover same-path quit,
+  dirty replacement, and changes made by another process.
+- Simulation and PTY tests cover startup argument mapping, same-path
+  independence, focused-pane Open/Save, Save As, dirty Open and New Tab Save /
+  Discard / Cancel, deterministic write failures, failed prompted-save
+  preservation, external-change save conflicts across Ctrl+S, quit/autosave,
+  Open, and New Tab, two-pane quit decisions, unnamed-buffer quit Save / Discard
+  / Cancel, active-prompt Ctrl+Q, and terminal restoration. TASK-011 does not
+  claim compatibility with user-configured backup/autosave settings beyond
+  autosave-on-quit; TASK-006 owns general configuration compatibility.
+- Verification passed: `just format`, `PATH=/home/nevd/go/bin:$PATH just lint`,
+  `just test`, `just test-pty`, `just build`, and `just vet`. Focused checks
+  also passed for the quit and dirty replacement workflows. The explicit PATH is
+  needed because this environment installs `golangci-lint` under the Go bin
+  directory, which is not on the shell's default PATH.
 
 ### TASK-006 - Load Micro configuration safely
 
