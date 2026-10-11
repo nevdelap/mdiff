@@ -1,11 +1,10 @@
 # mdiff
 
-`mdiff` is a planned standalone, terminal-based side-by-side diff editor written
-in Go. The design reuses Micro editor capabilities and defines a shared
-diff-aware viewport so insertions, deletions, and wrapped lines remain aligned.
-
-The application is currently a Go project scaffold. Its command prints a
-hello-world message; the editor has not been implemented.
+`mdiff` is a standalone Go CLI prototype for a terminal-based, side-by-side diff
+editor. It reuses Micro's in-memory editing and rendering code and maps both
+panes onto one diff-aware viewport so insertions, deletions, and wrapped lines
+remain aligned. The current prototype keeps both buffers in memory and does not
+open or save files.
 
 ## Run
 
@@ -21,6 +20,13 @@ The command can also be run directly:
 go run ./cmd/mdiff
 ```
 
+Run without file arguments. Paste text into either pane, use `F6` to switch
+panes, `Ctrl-Up`/`Ctrl-Down` or the mouse wheel to scroll both panes together,
+and `Alt-Up`/`Alt-Down` to jump between differences. `Tab` keeps its Micro
+indentation/completion behavior. Press `Ctrl-Q` to exit. Micro settings and
+colorschemes are read from the user's Micro configuration; plugins are not
+loaded.
+
 ## Development
 
 See [docs/development.md](docs/development.md) for setup, formatting, linting,
@@ -30,10 +36,12 @@ Contributor responsibilities and the independent review workflow are described
 in [docs/roles.md](docs/roles.md) and
 [`design_docs/agent_workflow.md`](design_docs/agent_workflow.md).
 
-The technical design and implementation milestones are in
-[design_docs/micro_diff_editor.md](design_docs/micro_diff_editor.md).
+The technical design, prototype findings, and implementation milestones are in
+[design_docs/micro_diff_editor.md](design_docs/micro_diff_editor.md),
+[design_docs/micro_integration_prototype.md](design_docs/micro_integration_prototype.md),
+and [design_docs/implementation_plan.md](design_docs/implementation_plan.md).
 
 ## License
 
-No project license has been selected yet. The Micro integration plan includes
-preserving upstream license and third-party notices when implementation begins.
+No project license has been selected yet. Micro's upstream and third-party
+notices are preserved in `internal/micro/`.

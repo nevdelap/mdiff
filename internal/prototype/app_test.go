@@ -1,0 +1,235 @@
+package prototype
+
+import (
+	"os"
+	"testing"
+
+	"github.com/micro-editor/tcell/v2"
+	"github.com/nevdelap/mdiff/internal/compare"
+	"github.com/nevdelap/mdiff/internal/micro/buffer"
+	"github.com/nevdelap/mdiff/internal/viewport"
+)
+
+func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
+	configDir := t.TempDir()
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(48, 6)
+	app, err := New(sim, configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	if app.left.buf.Type.Kind != buffer.BTTransient.Kind || app.right.buf.Type.Kind != buffer.BTTransient.Kind {
+		t.Fatal("both panels must use Micro transient buffers")
+	}
+	if app.left.buf == app.right.buf {
+		t.Fatal("panels unexpectedly share one Micro buffer")
+	}
+	if app.left.buf.LinesNum() != 1 || app.right.buf.LinesNum() != 1 {
+		t.Fatal("new panes are not empty")
+	}
+
+	leftText := "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"
+	rightText := "one\ninserted\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"
+	app.handle(tcell.NewEventPaste(leftText, ""))
+	app.handle(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone, ""))
+	app.handle(tcell.NewEventPaste(rightText, ""))
+	if app.left.buf.Line(1) != "two" || app.right.buf.Line(1) != "inserted" {
+		t.Fatalf("paste did not update independent buffers: left=%q right=%q", app.left.buf.Line(1), app.right.buf.Line(1))
+	}
+	if !hasSpacer(app.layout.Rows, viewport.Left) {
+		t.Fatal("inserted line has no left-side virtual spacer")
+	}
+	if app.left.buf.Line(1) == "inserted" {
+		t.Fatal("editing right pane changed left buffer")
+	}
+	app.focus = viewport.Right
+	app.setFocus()
+	app.handle(tcell.NewEventKey(tcell.KeyCtrlZ, 0, tcell.ModCtrl, ""))
+	if app.right.buf.LinesNum() != 1 || app.right.buf.Line(0) != "" {
+		t.Fatalf("Micro undo did not revert only the right pane: line count=%d line0=%q", app.right.buf.LinesNum(), app.right.buf.Line(0))
+	}
+	if app.left.buf.Line(1) != "two" {
+		t.Fatal("undo in the right pane changed the left buffer")
+	}
+	app.handle(tcell.NewEventKey(tcell.KeyCtrlY, 0, tcell.ModCtrl, ""))
+	if app.right.buf.Line(1) != "inserted" {
+		t.Fatalf("Micro redo did not restore the right pane: line count=%d line1=%q", app.right.buf.LinesNum(), app.right.buf.Line(1))
+	}
+
+	for _, side := range []viewport.Side{viewport.Left, viewport.Right} {
+		app.focus = side
+		app.setFocus()
+		app.focusedPane().h.GotoLoc(buffer.Loc{X: 0, Y: 0})
+		app.top = 0
+		app.handle(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModAlt, ""))
+		if app.focusedPane().h.Cursor.Y != 1 || app.top != 1 {
+			t.Fatalf("diff jump from side %d did not land on the first hunk: cursor=%v top=%d", side, app.focusedPane().h.Cursor.Loc, app.top)
+		}
+	}
+
+	app.top = 2
+	app.clampTop()
+	before := app.top
+	app.handle(tcell.NewEventMouse(4, 4, tcell.WheelDown, tcell.ModNone, ""))
+	if app.top <= before {
+		t.Fatalf("wheel event did not advance shared viewport: before=%d after=%d", before, app.top)
+	}
+	app.handle(tcell.NewEventMouse(35, 4, tcell.WheelUp, tcell.ModNone, ""))
+	if app.top >= before+3 {
+		t.Fatalf("wheel event over right panel did not scroll the shared viewport: %d", app.top)
+	}
+
+	app.focus = viewport.Left
+	app.handle(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModCtrl, ""))
+	if app.top == 0 {
+		t.Fatal("keyboard scrolling did not change shared viewport")
+	}
+	app.focus = viewport.Right
+	app.handle(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModCtrl, ""))
+
+	if err := app.left.buf.SetOptionNative("softwrap", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.right.buf.SetOptionNative("softwrap", true); err != nil {
+		t.Fatal(err)
+	}
+	app.handle(tcell.NewEventResize(24, 8))
+	if app.cols != 24 || app.rows != 7 {
+		t.Fatalf("resize dimensions are cols=%d rows=%d", app.cols, app.rows)
+	}
+	app.draw()
+
+	// Insert above the visible anchor and verify the same logical line remains
+	// at the top when it still exists uniquely in the edited side.
+	app.focus = viewport.Left
+	app.left.h.GotoLoc(buffer.Loc{X: 0, Y: 4})
+	app.top = app.layout.RowFor(viewport.Left, 4)
+	anchor := app.captureAnchor()
+	if !anchor.valid {
+		t.Fatal("expected a real logical row to anchor the viewport")
+	}
+	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "added above\n")
+	app.rebuildWithAnchor(anchor)
+	cell := app.layout.Rows[app.top].Left
+	if anchor.side == viewport.Right {
+		cell = app.layout.Rows[app.top].Right
+	}
+	anchoredBuf := app.left.buf
+	if anchor.side == viewport.Right {
+		anchoredBuf = app.right.buf
+	}
+	if cell.Line != anchorLine(anchoredBuf, anchor) || cell.WrapRow != anchor.wrapRow {
+		t.Fatalf("viewport anchor jumped after insertion above: top=%d anchor=%#v row=%#v", app.top, anchor, app.layout.Rows[app.top])
+	}
+	app.focus = viewport.Left
+	app.setFocus()
+	app.left.h.GotoLoc(buffer.Loc{X: 0, Y: 0})
+	app.handle(tcell.NewEventKey(tcell.KeyRune, 'X', tcell.ModNone, ""))
+	if app.left.buf.Line(0) != "Xadded above" || app.right.buf.Line(0) != "one" {
+		t.Fatalf("Micro key editing did not stay in the focused buffer: left=%q right=%q", app.left.buf.Line(0), app.right.buf.Line(0))
+	}
+	app.handle(tcell.NewEventKey(tcell.KeyTAB, 0, tcell.ModNone, ""))
+	if app.left.buf.Line(0) == "Xadded above" {
+		t.Fatal("Tab no longer runs Micro's indentation action")
+	}
+
+	app.Close()
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("transient editor wrote configuration or buffer state: %v", entries)
+	}
+}
+
+func hasSpacer(rows []viewport.Row, side viewport.Side) bool {
+	for _, row := range rows {
+		cell := row.Left
+		if side == viewport.Right {
+			cell = row.Right
+		}
+		if cell.Spacer {
+			return true
+		}
+	}
+	return false
+}
+
+func anchorLine(b *buffer.Buffer, anchor anchor) int {
+	occurrence := 0
+	for line := 0; line < b.LinesNum(); line++ {
+		if b.Line(line) == anchor.text {
+			if occurrence == anchor.occurrence {
+				return line
+			}
+			occurrence++
+		}
+	}
+	return -1
+}
+
+func TestAlignedRowsUseMaximumWrapHeight(t *testing.T) {
+	pairs := compare.Align([]string{"a", "long"}, []string{"a", "other"})
+	layout := viewport.Expand(pairs, func(line int) int {
+		if line == 1 {
+			return 3
+		}
+		return 1
+	}, func(line int) int {
+		if line == 1 {
+			return 2
+		}
+		return 1
+	})
+	if len(layout.Rows) != 4 {
+		t.Fatalf("got %d aligned visual rows, want 4", len(layout.Rows))
+	}
+	if !layout.Rows[3].Right.Continuation {
+		t.Fatalf("shorter wrapped side did not receive a continuation spacer: %#v", layout.Rows[3])
+	}
+}
+
+func TestDrawAppliesFocusedCursorToTerminalScreen(t *testing.T) {
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(48, 10)
+	app, err := New(sim, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	app.focus = viewport.Right
+	app.setFocus()
+	app.right.buf.Insert(buffer.Loc{X: 0, Y: 0}, "cursor")
+	app.right.h.GotoLoc(buffer.Loc{X: 3, Y: 0})
+	app.draw()
+	assertSimulationCursor(t, sim, app.right.x+3, 0, true)
+
+	app.top = len(app.layout.Rows) // Deliberately place the cursor off-screen.
+	app.draw()
+	assertSimulationCursor(t, sim, -1, -1, false)
+
+	sim.SetSize(60, 12)
+	app.handle(tcell.NewEventResize(60, 12))
+	app.draw()
+	visual := app.right.view.VLocFromLoc(app.right.h.Cursor.Loc)
+	row := app.layout.CursorRow(viewport.Right, app.right.h.Cursor.Y, visual.Row)
+	assertSimulationCursor(t, sim, app.right.x+visual.VisualX, row-app.top, true)
+}
+
+func assertSimulationCursor(t *testing.T, sim tcell.SimulationScreen, wantX, wantY int, wantVisible bool) {
+	t.Helper()
+	x, y, visible := sim.GetCursor()
+	if x != wantX || y != wantY || visible != wantVisible {
+		t.Fatalf("terminal cursor=(%d,%d,%t), want (%d,%d,%t)", x, y, visible, wantX, wantY, wantVisible)
+	}
+}

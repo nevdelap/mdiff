@@ -61,5 +61,5 @@ jobs:
         run: just --no-deps build
       - name: Smoke test command
         run: |
-          output="$(go run -buildvcs=false ./cmd/mdiff)"
-          test "$output" = "mdiff: hello, world"
+          output="$(go run -buildvcs=false ./cmd/mdiff --version)"
+          test "$output" = "mdiff prototype (Micro v2.0.15)"

@@ -106,7 +106,7 @@ Handoff:
 
 ### TASK-002 - Prototype Micro integration and shared diff scrolling
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -190,12 +190,24 @@ Acceptance criteria:
 - PTY smoke coverage confirms paste, at least one scroll from each side, resize,
   normal exit, and terminal restoration. The simulation suite covers
   wrap/alignment and anchor cases that a PTY cannot reliably inspect.
-- `just format`, `just lint`, `just test`, `just build`, and the prototype PTY
-  recipe pass on Linux. The simulation and build/test gates also pass on macOS
-  in CI; PTY coverage runs on macOS if the selected harness supports it.
+- `just format`, `just lint`, `just test`, `just build`, and `just test-pty`
+  pass on Linux. The simulation and build/test gates also pass on macOS in CI;
+  PTY coverage runs on macOS if the selected harness supports it.
 - The task handoff records source volume copied, local patch count, renderer
   adaptation size, limitations, and a justified decision to proceed with or
   replace the recommended architecture.
+
+### Deferred findings recorded after TASK-002
+
+- Character-level diffing is a product requirement. Diff rendering must mark
+  changed character spans within replacement lines; line-level hunk coloring
+  alone does not satisfy it. Preserve the existing virtual-row line alignment
+  and underlying Micro buffer contents. Cover insertions and deletions within a
+  line, Unicode text, and transitions between changed and unchanged lines.
+- Manual use found no visible terminal cursor. This review finding is resolved:
+  the active cursor is now applied to the real terminal after cell composition,
+  with simulation coverage for visible, hidden, and resize cases and PTY
+  coverage for the cursor position after resize.
 
 Verification:
 
@@ -203,8 +215,42 @@ Verification:
 - `just lint`
 - `just test`
 - `just build`
-- A dedicated, documented prototype PTY recipe (to be added with the harness)
+- `just test-pty`
 - Linux and macOS CI jobs for all supported simulation/build tests
 
-Do not begin the full editor, configuration, or plugin tasks until TASK-002 is
-reviewed and its architecture decision is recorded.
+Handoff:
+
+- Copied the pinned Micro `v2.0.15` source closure under `internal/micro/`: 74
+  production Go files / about 20,876 lines, 13 package/runtime areas, plus
+  tests, embedded runtime assets, and upstream license notices. Import paths
+  were rewritten to comply with Go's `internal/` rule. No upstream checkout was
+  modified.
+- Added four behavioral patch files: transient no-write buffers, read-only
+  binding initialization, unsafe-action filtering and optional `InfoBar` guards.
+  The exact patch inventory and compatibility limits are in
+  [`micro_integration_prototype.md`](micro_integration_prototype.md).
+- Confirmed Micro rendering adaptation does not require replacing `BufWindow`:
+  `BufWindow.Display` renders each source line into an offscreen tcell surface,
+  then mdiff maps its cells onto virtual spacers and shared wrapped visual rows.
+  The adapter is 116 lines; the alignment and viewport packages total 195 lines,
+  compared with 903 lines in Micro's existing `BufWindow` renderer.
+- The prototype covers two independent editable buffers, bracketed paste, shared
+  keyboard/mouse scrolling, diff jumps from either side, soft wrapping,
+  resizing, edit-anchor preservation, and no-write shutdown. PTY tests
+  synchronize on rendered state, verify keyboard scrolling from both focused
+  panes, check an in-bounds cursor after resize, and verify terminal restoration
+  and a clean config directory after normal exit and interruption following an
+  edit.
+- Architecture decision: **GO** to continued implementation with the namespaced
+  Micro subtree and the shared visual-row model. Do not treat this prototype as
+  proof of plugin compatibility or large-input performance; both remain
+  explicitly deferred.
+- Follow-up notes from manual use after TASK-002: changed-line highlighting is
+  currently line-level only, but the product requirement is character-level
+  diffing within changed lines. The missing visible cursor was a review finding
+  and is resolved by applying its position to the real terminal after cell
+  composition.
+- Linux `just format`, `just lint`, `just test`, `just test-pty`, and
+  `just build` passed. `go run -buildvcs=false ./cmd/mdiff --version` printed
+  the pinned prototype version. macOS verification is delegated to the existing
+  CI matrix and has not been run locally.

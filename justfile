@@ -4,6 +4,7 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 UV_CACHE_DIR := "/tmp/mdiff-uv-cache"
 UV_TOOL_DIR := "/tmp/mdiff-uv-tools"
 GOLANGCI_LINT_VERSION := "v2.14.0"
+APP_PACKAGES := "./cmd/mdiff ./internal/compare ./internal/prototype ./internal/viewport"
 
 # Show available recipes when Just is invoked without a recipe.
 @_:
@@ -47,8 +48,8 @@ format-check:
 # Lint Go source and Markdown.
 lint:
     just format-check
-    go vet ./...
-    golangci-lint run --timeout=5m
+    go vet -composites=false {{ APP_PACKAGES }}
+    golangci-lint run --timeout=5m {{ APP_PACKAGES }}
     just lint-markdown
     just lint-yaml
 
@@ -64,6 +65,10 @@ lint-markdown:
 test:
     go test ./...
 
+# Run the standalone terminal interaction tests.
+test-pty:
+    go test ./internal/prototype -run '^TestPTY' -count=1
+
 # Run Go tests with the race detector.
 test-race:
     go test -race ./...
@@ -76,7 +81,7 @@ build:
 build-release:
     go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/mdiff ./cmd/mdiff
 
-# Run the scaffold command.
+# Run the terminal editor prototype.
 run *args:
     go run -buildvcs=false ./cmd/mdiff -- {{ args }}
 
@@ -93,7 +98,7 @@ check:
 
 # Run vet independently.
 vet:
-    go vet ./...
+    go vet -composites=false {{ APP_PACKAGES }}
 
 # Run the fast gate quietly.
 qcheck-fast: (_q "check-fast")

@@ -52,16 +52,19 @@ The full local gate is:
 just check
 ```
 
-Use `just run` to execute the scaffold command. `just test-race` runs Go tests
-with the race detector. The current scaffold has no test files yet, but the test
-recipes are ready for implementation work.
+Use `just run` to launch the terminal prototype. `just test` runs the
+simulation, alignment, viewport, and PTY coverage. `just test-race` runs the
+complete Go test suite with the race detector. Use `just test-pty` to run only
+the standalone terminal interaction tests.
 
 ## Go conventions
 
 - `go.mod` records the minimum Go version and module dependencies.
 - Format Go source with `gofmt`; do not commit generated binaries or local check
   logs.
-- Run `go vet ./...` and `golangci-lint run` before handoff.
+- Run `just vet` and `just lint` before handoff. These lint the mdiff packages;
+  the namespaced Micro source is pinned upstream code and is verified by its
+  package tests and the integration tests rather than by mdiff's lint policy.
 - Keep tests beside the package they exercise and run them with the Go standard
   test runner.
 - Use `go mod tidy` when dependency declarations change, then inspect both

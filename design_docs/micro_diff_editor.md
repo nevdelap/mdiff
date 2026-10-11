@@ -347,7 +347,7 @@ mdiff needs bounded worker ownership and must not interpret timeout completion
 as an error signal. These operations are a suitable prototype baseline, but must
 be benchmarked for adversarial large inputs in Phase 4.
 
-**Proposed local patch inventory:** (1) rehome all focused Go packages under
+**Prototype local patch inventory:** (1) rehome all focused Go packages under
 `internal/micro` and rewrite the legacy upstream module imports; (2) keep
 embedded Micro runtime assets under `internal/micro/runtime`; (3) introduce
 `BTTransient`, skip its constructor disk/config-state paths, and make `Fini`
@@ -357,17 +357,26 @@ plugins; (5) split read-only default keybinding initialization from the upstream
 helper that creates `bindings.json`; (6) guard or replace independent
 `BufWindow.Relocate`/`displayBuffer` behavior with the shared visual-row
 provider; and (7) keep upstream notices and pin/patch metadata with the subtree.
-This is a proposal for TASK-002 and later work; no upstream or product source
-was modified for this audit.
+The actual patch set and prototype findings are recorded in
+[`micro_integration_prototype.md`](micro_integration_prototype.md). The
+prototype showed that keeping Micro's `BufWindow.Display` intact is feasible: it
+renders each source line into a temporary tcell surface, and mdiff places those
+rendered cells in its shared visual-row map.
 
-**Recommendation: GO to TASK-002, with a strict prototype gate.** The pinned
-source closure compiles after rehoming, and its real buffers, key dispatch,
-tcell, and rendering code can be used without a separate process. The closure is
-large (20,876 Go source lines) and the renderer currently owns independent
-`StartLine` state, so this does not justify a full integration commitment. TASK-
-002 should validate the shared-row renderer before any expansion into full
-configuration or editing behavior. Stop and reassess the fork approach if the
-prototype must replace most of `BufWindow` to render shared rows.
+**TASK-002 result: GO to continued implementation using the namespaced Micro
+subtree.** The pinned source closure compiled after rehoming, independent
+transient buffers accepted edits and bracketed paste, and the same shared
+expanded visual rows drove both panes through insertion spacers and unequal
+soft-wrap heights. Simulation and PTY checks covered scrolling, cursor mapping,
+diff navigation, resize, edit anchoring, terminal restoration, and no-write
+shutdown. Subsequent manual use found that the real terminal cursor was not
+updated after composition; this review finding is resolved by applying its
+position to the terminal after copying composed cells. Simulation checks cover
+visible, hidden, and resized cursor states, and PTY coverage checks an in-bounds
+cursor after resize. Character-level changed-span highlighting is also required
+follow-up work; TASK-002 only implemented line-level comparison. The source
+volume and global-screen limitation still require upstream pinning and focused
+patch review.
 
 ### Consequences
 
@@ -660,8 +669,11 @@ selections, whitespace indicators, and cursors through a row-provider or forked
 draw loop that accepts `AlignedLine` and subrow. It renders a spacer as a
 cleared row with diff gutter marker and the configured
 `diff-deleted`/`diff-added` style; no fake text is put in the buffer.
-Replacement text highlighting can use line-level background and optional
-intraline character highlights as a later enhancement.
+Replacement text highlighting must include character-level spans within changed
+lines. Line-level background may identify a changed hunk, while character-level
+additions and deletions show the actual changed text. This remains required
+follow-up work beyond the initial TASK-002 prototype. The character spans affect
+rendering only; they never alter either Micro buffer.
 
 ### Shared viewport, cursor movement, and scroll anchoring
 
@@ -972,18 +984,18 @@ recommendation is **GO to the bounded TASK-002 prototype**. The prototype must
 still validate the adapted renderer and no-write behavior before any full
 integration commitment.
 
-### Phase 1: Integration and scroll prototype (highest priority)
+### Phase 1: Integration and scroll prototype (complete in TASK-002)
 
-Create a minimal branch/subtree prototype with two empty transient Micro
-buffers, one tcell screen, one split renderer, simple line diff, virtual
-spacers, synchronized scrolling, cursor visibility, bracketed paste, and resize.
-Do not build full config/plugin support first. Use simulation screen plus PTY to
-demonstrate a deletion on one side, insertion on the other, scroll from either
-pane, softwrap with unequal widths, and cursor navigation across a hunk without
-drift. **Exit gate:** both panes render the same canonical expanded visual rows
-and pass anchor stability scenarios. If Micro rendering cannot be adapted
-without replacing most of `BufWindow`, reassess a Micro fork as the primary
-application rather than continuing a misleading package extraction.
+The completed prototype is documented in
+[`micro_integration_prototype.md`](micro_integration_prototype.md). It has two
+empty transient Micro buffers, one tcell terminal, virtual spacers, shared
+visual rows, cursor rendering, bracketed paste, and resize coverage. A review
+found and fixed the terminal cursor handoff, with simulation and PTY regressions
+for its real terminal position. Character-level diffing is also required
+follow-up work; this prototype compares lines only. The exit gate passed for the
+shared-row architecture without replacing most of `BufWindow`. The remaining
+phases extend this proof with versioned diffing, character-span rendering,
+broader configuration compatibility, performance work, and release readiness.
 
 ### Phase 2: Buffer lifecycle and editor action preservation
 
