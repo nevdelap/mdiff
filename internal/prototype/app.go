@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,38 +20,44 @@ import (
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	ulua "github.com/nevdelap/mdiff/internal/micro/lua"
 	"github.com/nevdelap/mdiff/internal/micro/screen"
+	"github.com/nevdelap/mdiff/internal/version"
 	"github.com/nevdelap/mdiff/internal/viewport"
 	lua "github.com/yuin/gopher-lua"
 )
 
 type pane struct {
-	buf   *buffer.Buffer
-	view  *display.BufWindow
-	h     *action.BufPane
-	x     int
-	width int
+	buf        *buffer.Buffer
+	view       *display.BufWindow
+	statusView *display.BufWindow
+	h          *action.BufPane
+	x          int
+	width      int
 }
 
 // App owns the two transient buffers, panes, alignment, and shared viewport.
 type App struct {
-	left, right    pane
-	layout         viewport.Layout
-	terminal       tcell.Screen
-	surface        tcell.SimulationScreen
-	paintScreen    tcell.SimulationScreen
-	top            int
-	rows           int
-	cols           int
-	focus          viewport.Side
-	closed         bool
-	coordinator    *diffCoordinator
-	versions       DiffVersions
-	layoutVersions DiffVersions
-	pairs          []compare.Pair
-	displayedLeft  []string
-	displayedRight []string
-	diffErr        error
-	handlingPaste  bool
+	left, right     pane
+	layout          viewport.Layout
+	terminal        tcell.Screen
+	surface         tcell.SimulationScreen
+	paintScreen     tcell.SimulationScreen
+	top             int
+	rows            int
+	cols            int
+	statusRow       int
+	menuRow1        int
+	menuRow2        int
+	focus           viewport.Side
+	closed          bool
+	coordinator     *diffCoordinator
+	versions        DiffVersions
+	layoutVersions  DiffVersions
+	pairs           []compare.Pair
+	displayedLeft   []string
+	displayedRight  []string
+	diffErr         error
+	handlingPaste   bool
+	blockedSequence string
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
@@ -121,9 +128,6 @@ func NewWithDebounce(s tcell.Screen, configDir string, cliDebounceMS *int) (*App
 	leftBuf := buffer.NewBufferFromString("", "", buffer.BTTransient)
 	rightBuf := buffer.NewBufferFromString("", "", buffer.BTTransient)
 	for _, b := range []*buffer.Buffer{leftBuf, rightBuf} {
-		b.SetName("Untitled")
-		b.Settings["statusline"] = false
-		b.Settings["ruler"] = false
 		b.Settings["scrollbar"] = false
 		b.Settings["diffgutter"] = false
 	}
@@ -336,7 +340,20 @@ func (a *App) resize(cols, rows int) {
 		rows = 2
 	}
 	anchor := a.captureAnchor()
-	a.cols, a.rows = cols, rows-1 // reserve a footer row
+	a.cols = cols
+	// Keep four dedicated bottom rows when the terminal can display them:
+	// one Micro status line per pane, one shared transient status row, and the
+	// two-row Micro key menu. Compact terminals retain an editor row and hide
+	// these chrome rows rather than overlapping them.
+	a.statusRow, a.menuRow1, a.menuRow2 = -1, -1, -1
+	if rows >= 5 {
+		a.rows = rows - 4
+		a.statusRow = a.rows + 1
+		a.menuRow1 = a.rows + 2
+		a.menuRow2 = a.rows + 3
+	} else {
+		a.rows = rows
+	}
 	leftWidth := cols / 2
 	rightWidth := cols - leftWidth - 1
 	if rightWidth < 1 {
@@ -352,6 +369,11 @@ func (a *App) resize(cols, rows int) {
 		p.view = display.NewBufWindow(p.x, 0, p.width, a.rows, p.buf)
 		p.view.Resize(p.width, a.rows)
 		p.view.SetActive((i == 0 && a.focus == viewport.Left) || (i == 1 && a.focus == viewport.Right))
+		p.statusView = &display.BufWindow{
+			View: &display.View{X: p.x, Y: a.rows, Width: p.width, Height: 1},
+			Buf:  p.buf,
+		}
+		p.statusView.SetActive((i == 0 && a.focus == viewport.Left) || (i == 1 && a.focus == viewport.Right))
 		p.h = action.NewBufPane(p.buf, p.view, nil)
 	}
 	a.expandWithAnchor(anchor, a.displayedLeft, a.displayedRight)
@@ -446,16 +468,39 @@ func (a *App) handle(event tcell.Event) bool {
 		a.resize(e.Size())
 		return false
 	case *tcell.EventMouse:
+		a.blockedSequence = ""
 		a.handleMouse(e)
 		return false
 	case *tcell.EventKey:
+		if a.rejectConflictingReservedBinding(e) {
+			return false
+		}
 		if e.Key() == tcell.KeyCtrlQ {
+			a.blockedSequence = ""
 			return true
 		}
-		if e.Key() == tcell.KeyF6 {
+		if e.Key() == tcell.KeyCtrlG {
+			a.blockedSequence = ""
+			a.showHelp()
+			return false
+		}
+		if e.Key() == tcell.KeyCtrlE {
+			a.blockedSequence = ""
+			a.openCommandBar()
+			return false
+		}
+		if action.InfoBar != nil && action.InfoBar.HasPrompt {
+			a.blockedSequence = ""
+			a.handlePromptEvent(e)
+			return false
+		}
+		if e.Key() == tcell.KeyCtrlW {
 			a.focus = 1 - a.focus
 			a.setFocus()
 			a.ensureCursorVisible()
+			return false
+		}
+		if a.handleRejectedSequence(e) {
 			return false
 		}
 		if e.Modifiers()&tcell.ModCtrl != 0 && (e.Key() == tcell.KeyUp || e.Key() == tcell.KeyDown) {
@@ -480,12 +525,152 @@ func (a *App) handle(event tcell.Event) bool {
 		p.buf.UpdateRules()
 		a.ensureCursorVisible()
 	case *tcell.EventPaste:
+		a.blockedSequence = ""
+		if action.InfoBar != nil && action.InfoBar.HasPrompt {
+			a.handlePromptEvent(e)
+			return false
+		}
 		p := a.focusedPane()
 		a.handlingPaste = true
 		p.h.HandleEvent(e)
 		a.handlingPaste = false
 		p.buf.UpdateRules()
 		a.ensureCursorVisible()
+	}
+	return false
+}
+
+func (a *App) handlePromptEvent(event tcell.Event) {
+	if action.InfoBar == nil || !action.InfoBar.HasPrompt {
+		return
+	}
+	action.InfoBar.HandleEvent(event)
+	a.focusedPane().buf.UpdateRules()
+	a.ensureCursorVisible()
+}
+
+func (a *App) showHelp() {
+	if action.InfoBar != nil {
+		action.InfoBar.Message("mdiff: Ctrl+W switches pane; Ctrl+Up/Down scroll; Alt+Up/Down jumps differences; Ctrl+Q quits")
+	}
+}
+
+// rejectConflictingReservedBinding prevents a configured Micro action from
+// being silently shadowed by mdiff's lifecycle, help, command, or pane-switch
+// keys. The matching built-in Micro actions remain compatible with mdiff's
+// equivalent behavior.
+func (a *App) rejectConflictingReservedBinding(event *tcell.EventKey) bool {
+	keyName := action.BufferKeyName(event)
+	if rejected, _, prefix := action.RejectedBufferSequenceState("<" + keyName + ">"); prefix {
+		a.blockedSequence = ""
+		if rejected == "" {
+			rejected = "configured key sequence"
+		}
+		a.reportRejectedAction(rejected)
+		return true
+	}
+	var allowed []string
+	switch event.Key() {
+	case tcell.KeyCtrlQ:
+		allowed = []string{"Quit"}
+	case tcell.KeyCtrlG:
+		allowed = []string{"ToggleHelp"}
+	case tcell.KeyCtrlE:
+		allowed = []string{"CommandMode"}
+	case tcell.KeyCtrlW:
+		allowed = []string{"NextSplit", "FirstSplit"}
+	default:
+		return false
+	}
+
+	rejected := action.RejectedBufferBindingForKey(event)
+	if rejected == "" {
+		return false
+	}
+	allowedActions := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		allowedActions[name] = true
+	}
+	for _, name := range strings.FieldsFunc(rejected, func(r rune) bool {
+		return r == '|' || r == '&' || r == ','
+	}) {
+		if !allowedActions[strings.TrimSpace(name)] {
+			a.blockedSequence = ""
+			a.reportRejectedAction(rejected)
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) openCommandBar() {
+	if action.InfoBar == nil {
+		return
+	}
+	p := a.focusedPane()
+	action.InfoBar.Prompt("> ", "", "Command", nil, func(input string, canceled bool) {
+		if canceled || strings.TrimSpace(input) == "" {
+			return
+		}
+		command := strings.Fields(input)[0]
+		if !safeCommand(command) {
+			action.InfoBar.Error("Command unavailable in mdiff: " + command)
+			return
+		}
+		p.h.HandleCommand(input)
+		p.buf.UpdateRules()
+		a.ensureCursorVisible()
+	})
+}
+
+func safeCommand(command string) bool {
+	switch strings.ToLower(command) {
+	case "goto", "jump", "replace", "replaceall", "retab", "show", "showkey", "memusage":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) reportRejectedAction(binding string) {
+	if action.InfoBar == nil {
+		return
+	}
+	name := strings.TrimSpace(strings.NewReplacer("|", ", ", "&", ", ", ",", ", ").Replace(binding))
+	if strings.Contains(name, "Save") {
+		action.InfoBar.Error("Save is unavailable: mdiff buffers exist only in memory")
+		return
+	}
+	if strings.Contains(name, "OpenFile") {
+		action.InfoBar.Error("Open is unavailable: mdiff edits exactly two in-memory buffers")
+		return
+	}
+	action.InfoBar.Error(name + " is unavailable in mdiff")
+}
+
+func (a *App) handleRejectedSequence(event *tcell.EventKey) bool {
+	keyName := action.BufferKeyName(event)
+	if a.blockedSequence == "" {
+		if rejected := action.RejectedBufferBindingForKey(event); rejected != "" {
+			a.reportRejectedAction(rejected)
+			return true
+		}
+	}
+	candidate := a.blockedSequence + "<" + keyName + ">"
+	rejected, exact, prefix := action.RejectedBufferSequenceState(candidate)
+	if exact {
+		a.blockedSequence = ""
+		a.reportRejectedAction(rejected)
+		return true
+	}
+	if prefix {
+		a.blockedSequence = candidate
+		return true
+	}
+	a.blockedSequence = ""
+	if rejected := action.RejectedBufferBindingForKey(event); rejected != "" {
+		a.reportRejectedAction(rejected)
+		return true
 	}
 	return false
 }
@@ -555,6 +740,8 @@ func (a *App) focusedPane() *pane {
 func (a *App) setFocus() {
 	a.left.view.SetActive(a.focus == viewport.Left)
 	a.right.view.SetActive(a.focus == viewport.Right)
+	a.left.statusView.SetActive(a.focus == viewport.Left)
+	a.right.statusView.SetActive(a.focus == viewport.Right)
 }
 
 func (a *App) handleMouse(e *tcell.EventMouse) {
@@ -687,26 +874,26 @@ func (a *App) draw() {
 	for y := 0; y < a.rows; y++ {
 		screen.SetContent(a.left.width, y, '│', nil, config.DefStyle)
 	}
-	footer := " F6: switch   Ctrl-Up/Down: scroll   Alt-Up/Down: diff   Ctrl-Q: quit "
+	status := a.focusName()
 	if a.isDiffStale() {
-		footer = " Diff updating… " + footer
+		status = "Diff updating… | " + status
 	}
 	if a.diffErr != nil {
-		footer = " Diff error: " + a.diffErr.Error() + " | " + footer
+		status = "Diff error: " + a.diffErr.Error() + " | " + status
 	}
-	if action.InfoBar != nil && action.InfoBar.HasMessage {
-		footer = " " + action.InfoBar.Msg + " |" + footer
+	if action.InfoBar != nil && (action.InfoBar.HasMessage || action.InfoBar.HasError) {
+		status = action.InfoBar.Msg + " | " + status
 	}
-	if a.focus == viewport.Right {
-		footer += " [right]"
-	} else {
-		footer += " [left]"
+	if action.InfoBar != nil && action.InfoBar.HasPrompt {
+		status, _ = a.promptDisplay()
 	}
-	for x, r := range []rune(footer) {
-		if x >= a.cols {
-			break
+	if a.statusRow >= 0 {
+		for _, p := range a.panes() {
+			display.NewStatusLine(p.statusView).Display()
 		}
-		screen.SetContent(x, a.rows, r, nil, config.DefStyle.Reverse(true))
+		a.renderLine(a.statusRow, status, config.DefStyle)
+		a.renderMenuLine(a.menuRow1, a.shortcutBar(0), a.focusNameIndicator())
+		a.renderMenuLine(a.menuRow2, "^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New Tab", "mdiff (wrapping micro) "+version.Version)
 	}
 	cursorX, cursorY, cursorVisible := a.cursorPosition()
 	screen.Screen = terminal
@@ -727,7 +914,102 @@ func (a *App) draw() {
 	a.terminal.Show()
 }
 
+func (a *App) focusName() string {
+	if a.focus == viewport.Right {
+		return "right"
+	}
+	return "left"
+}
+
+func (a *App) renderLine(y int, text string, style tcell.Style) {
+	_, height := a.surface.Size()
+	if y < 0 || y >= height {
+		return
+	}
+	for x := 0; x < a.cols; x++ {
+		screen.SetContent(x, y, ' ', nil, style)
+	}
+	for x, r := range []rune(text) {
+		if x >= a.cols {
+			break
+		}
+		screen.SetContent(x, y, r, nil, style)
+	}
+}
+
+func (a *App) shortcutBar(_ int) string {
+	return "^W Switch Panes, ^Q Quit, ^S Save, ^O Open, ^G Help, ^E Command Bar, ^K Cut Line"
+}
+
+func (a *App) focusNameIndicator() string {
+	if a.focus == viewport.Right {
+		return "Right"
+	}
+	return "Left"
+}
+
+func (a *App) renderMenuLine(y int, left, right string) {
+	style := config.DefStyle.Reverse(true)
+	_, height := a.surface.Size()
+	if y < 0 || y >= height {
+		return
+	}
+	for x := 0; x < a.cols; x++ {
+		screen.SetContent(x, y, ' ', nil, style)
+	}
+	leftRunes, rightRunes := []rune(left), []rune(right)
+	rightRunes = truncateRunes(rightRunes, a.cols)
+	leftRunes = truncateRunes(leftRunes, max(0, a.cols-len(rightRunes)-1))
+	for x, r := range leftRunes {
+		screen.SetContent(x, y, r, nil, style)
+	}
+	start := a.cols - len(rightRunes)
+	for i, r := range rightRunes {
+		screen.SetContent(start+i, y, r, nil, style)
+	}
+}
+
+func truncateRunes(text []rune, width int) []rune {
+	if width < 0 {
+		width = 0
+	}
+	if len(text) > width {
+		return text[:width]
+	}
+	return text
+}
+
+func (a *App) promptDisplay() (string, int) {
+	if action.InfoBar == nil {
+		return "", 0
+	}
+	prefix := []rune(action.InfoBar.Msg)
+	input := []rune(string(action.InfoBar.LineBytes(0)))
+	if len(prefix) > a.cols {
+		prefix = prefix[:a.cols]
+	}
+	available := max(0, a.cols-len(prefix))
+	cursor := min(max(action.InfoBar.Cursor.X, 0), len(input))
+	start := 0
+	if available > 0 {
+		start = max(0, cursor-available+1)
+	}
+	start = min(start, len(input))
+	end := min(len(input), start+available)
+	line := append([]rune(nil), prefix...)
+	line = append(line, input[start:end]...)
+	cursorX := len(prefix) + cursor - start
+	if cursorX >= a.cols {
+		cursorX = a.cols - 1
+	}
+	return string(line), cursorX
+}
+
 func (a *App) cursorPosition() (x, y int, visible bool) {
+	if action.InfoBar != nil && action.InfoBar.HasPrompt {
+		_, x = a.promptDisplay()
+		return x, a.statusRow, true
+	}
 	p := a.focusedPane()
 	loc := p.h.Cursor.Loc
 	visual := p.view.VLocFromLoc(loc)

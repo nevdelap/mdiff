@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/nevdelap/mdiff/internal/prototype"
+	appversion "github.com/nevdelap/mdiff/internal/version"
 )
 
 func main() {
@@ -22,7 +23,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *version {
-		fmt.Println("mdiff prototype (Micro v2.0.15)")
+		fmt.Println("mdiff (wrapping micro) " + appversion.Version)
 		return
 	}
 	if flags.NArg() != 0 {

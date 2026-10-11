@@ -4,8 +4,36 @@ This file is the source of truth for implementation task scope, dependencies,
 acceptance criteria, and state. The architecture and proposed phases are
 described in [`micro_diff_editor.md`](micro_diff_editor.md). TASK-001 pins and
 audits Micro integration; TASK-002 validates the shared-scroll prototype.
-TASK-003 through TASK-010 specify the remaining product implementation and
+TASK-003 through TASK-011 specify the remaining product implementation and
 release work.
+
+## Product direction — owner decision, 2026-10-11
+
+**mdiff should work like Micro in every way except for its two-pane
+specialness.** Micro is the behavior baseline, not a selective source of editing
+components. The only intended product-level difference is that two active panes
+are shown and edited together in one diff-aligned viewport. Preserve Micro's
+file open and save behavior, per-pane filenames, keybindings, prompts, status
+lines, two-row comma-separated key menu, settings, colorschemes, syntax, and
+other ordinary editor behavior. Adapt a feature only when it conflicts with the
+two-pane diff model; do not retain earlier restrictions merely because they were
+part of the prototype.
+
+Maximize reuse of Micro's existing code and minimize code differences from the
+pinned Micro source. Keep mdiff-specific patches small, explicit, and limited to
+integration needs such as the shared diff viewport, paired panes, per-pane file
+identity, and mdiff-owned pane switching. Prefer adapting Micro extension points
+over copying or replacing editor behavior.
+
+This decision supersedes the earlier memory-only/no-write product policy and any
+task text below that forbids Open, Save, or ordinary Micro behavior. The
+implementation tasks must be read and updated against this contract. The
+pane-switch key is Ctrl+W (shown as `^W Switch Panes`); Micro's Ctrl+S Save and
+Ctrl+O Open operate on the focused pane.
+
+In the two-row key menu, put the focused `Left`/`Right` indicator at the right
+edge of row one. Put `mdiff (wrapping micro) v0.0.1` at the right edge of row
+two, using the same real version value that `--version` reports.
 
 ## Tasks
 
@@ -490,13 +518,12 @@ Handoff:
 
 ### TASK-005 - Complete Micro editing behavior
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
-- Validate and complete ordinary Micro editing behavior in both transient panes,
-  without exposing file persistence or actions that leave the two-pane
-  application.
+- Validate and complete ordinary Micro editing behavior in both panes. TASK-011
+  supplies the per-pane file lifecycle so these remain normal Micro buffers.
 
 Dependencies:
 
@@ -516,28 +543,35 @@ Scope:
   editing. Preserve independent cursor, selection, and undo history per pane.
 - Ensure all edits pass through the mutation/version hook from TASK-004 without
   splitting paste or compound edits into surprising undo groups.
-- Keep file arguments, open/save/save-as/reload, shell, suspend, and external
-  command actions unavailable. A rejected configured action must produce a
-  concise user-visible explanation without changing either buffer.
-- Add a compact, Micro-style shortcut bar at the bottom of the terminal. Show
-  `^Q Quit`, `^G Help`, `^E Command Bar`, `^K Cut Line`, `^F Find`, `^Z Undo`,
-  `^Y Redo`, `^A Select All`, and `^D Duplicate Line` when each action is
-  available in the current context using the built-in bindings available before
-  user configuration is loaded. Do not advertise an action whose built-in
-  binding is absent, intercepted, or unavailable. TASK-006 owns user binding
-  remaps and must update these labels from the effective configured bindings.
-- Do not show `^S Save`, `^O Open`, or `^T New`: persistent file operations and
-  creating additional buffers are outside the memory-only, exactly-two-pane
-  product contract. Never add a path prompt that implies persistence is
-  supported.
-- Define responsive behavior for narrow terminals: prioritize the quit and
-  essential editing/help actions, omit lower-priority hints before allowing
-  labels to collide or wrap into pane content, and keep status/cursor rendering
-  distinct from the shortcut bar.
+- Keep open/save/save-as/reload unavailable in TASK-005; per-pane Open and Save
+  are specified in TASK-011. Shell, suspend, and external command actions remain
+  unavailable. A rejected configured action must produce a concise user-visible
+  explanation without changing either buffer.
+- Add a Micro-style per-pane status line above a two-row key menu. Show each
+  pane's filename or `No name`, cursor position as `(line,column)`, filetype as
+  `ft:<type>`, line-ending mode, and encoding. Keep transient prompts and
+  messages visible in their own shared status area.
+- Put `^W Switch Panes` first in the key menu, then preserve Micro's exact
+  key-menu order and comma separators: row one is
+  `^Q Quit, ^S Save, ^O Open, ^G Help, ^E Command Bar, ^K Cut Line`; row two is
+  `^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New Tab`.
+  TASK-011 implements Open and Save for the active pane. Adapt New Tab to the
+  exactly-two-pane model rather than creating a third pane. TASK-006 owns user
+  binding remaps and must update labels from effective bindings.
+- Reserve both rows for the key menu and avoid collisions or wrapping into pane
+  content at narrow terminal widths. Keep per-pane status and cursor rendering
+  distinct from the shortcut bar. Show only this one permanent key-hint menu;
+  keep the separate status row available for transient messages and prompts, but
+  remove the permanent F6/scroll/difference controls legend from it. Ensure
+  Ctrl+W switches panes through the actual terminal input path and appears first
+  as `^W Switch Panes`. Put the current Left/Right pane indicator at the far
+  right end of the first key-menu row and `mdiff (wrapping micro) v0.0.1` at the
+  far right of row two. The footer and `--version` use the same real version
+  source. Function keys are not required.
 
 Out of scope:
 
-- Full Micro plugin compatibility, which has a separate explicit opt-in task.
+- Full Micro plugin compatibility, which is covered by TASK-007.
 - Redesigning diff algorithms or the shared vertical coordinate.
 
 Acceptance criteria:
@@ -548,11 +582,19 @@ Acceptance criteria:
   TASK-006 after config loading is implemented.
 - Tests cover built-in ordinary editing actions and confirm unsafe actions fail
   clearly without writing files, changing buffer names, or terminating the
-  application.
-- Simulation-screen tests verify the Micro-style bottom shortcut bar, labels and
-  built-in bindings, omission of Save/Open/New, and graceful clipping or
-  prioritization at narrow terminal widths without overlap with pane content,
-  status, or the visible cursor.
+  application. Tests also confirm conflicting configured unsafe bindings on
+  Ctrl+Q, Ctrl+G, and Ctrl+E are reported without running the app-owned action,
+  while the default Ctrl+Q still exits. Ctrl+W switches panes. TASK-011 covers
+  Ctrl+S Save and Ctrl+O Open for the focused pane.
+- Simulation-screen tests verify two per-pane Micro-style status lines and the
+  two-row key menu with comma separators, exact label order, and no overlap at
+  narrow widths. Each status line shows the current filename or `No name`,
+  cursor position, filetype, line-ending mode, and encoding. `^W Switch Panes`
+  precedes Micro's unchanged key-menu sequence, and the current Left/Right pane
+  indicator appears at the far right of row one; the product/version label is at
+  the far right of row two and matches `--version`. Transient messages and
+  prompts remain visible. PTY tests verify Ctrl+W switches focus. TASK-011
+  covers the Open/Save menu actions.
 - Bracketed paste preserves exact text and newline semantics, remains one
   coherent undo operation where Micro supports it, and updates the diff after
   the mutation version changes.
@@ -576,6 +618,134 @@ Handoff:
   Micro behavior that cannot be preserved. Update the compatibility matrix only
   with behavior covered by tests.
 
+Implementation handoff:
+
+- Kept Micro's independent `BufPane` cursors, selections, action dispatch, and
+  undo stacks. Simulation tests exercise movement, select all, copy/cut/paste,
+  cut and duplicate line, indentation/outdentation, in-buffer autocomplete,
+  search, undo/redo, focus changes, and bracketed paste's exact newline content
+  and single-operation undo/redo in both transient panes.
+- Routed Micro's InfoBar prompt input through the app and rendered it on a
+  dedicated status row, with its cursor shown on that row. Ctrl+F therefore
+  performs interactive search. Ctrl+E opens a restricted Micro-style command
+  bar; only `goto`, `jump`, `replace`, `replaceall`, `retab`, `show`, `showkey`,
+  and `memusage` are accepted. Ctrl+G displays concise mdiff help without
+  creating a third buffer. Rejected commands show a status message.
+- Added a Micro-style status line for each pane, a shared transient status row,
+  and the two-row comma-separated Micro key menu. The menu prefixes Micro's
+  standard order with `^W Switch Panes`, puts the focused pane indicator at the
+  right of row one, and the product/version label at the right of row two. The
+  footer and `--version` share the application version constant. Narrow
+  terminals truncate menu text without wrapping or overlapping the right-side
+  indicators.
+- `Ctrl+Q` exits; `Ctrl+E` and `Ctrl+G` are mdiff-owned command/help bindings;
+  `Ctrl+W` switches panes, while `Ctrl+Up/Down` and `Alt+Up/Down` scroll and
+  navigate differences. Conflicting configured unsafe actions and rejected
+  sequence prefixes on mdiff-owned keys produce a visible explanation without
+  running either action; default Ctrl+Q still quits. Save, Save As, Open, shell,
+  suspend, tab, split, help-buffer, and external command actions are filtered in
+  TASK-005. TASK-011 restores per-pane Open, Save, and New Tab behavior.
+- The Micro command bar intentionally supports a safe subset rather than
+  arbitrary Micro commands. The help key provides short inline usage guidance
+  instead of opening Micro's help buffer. External clipboard tools are not
+  invoked; in-memory clipboard actions and terminal bracketed paste are tested.
+- `just format`, `just lint`, `just test`, `just test-pty`, `just build`, and
+  the repository Go vet and golangci-lint gates passed after the review fixes.
+- TASK-005 preserves Micro's pinned default line-number setting in both panes;
+  TASK-006 verifies broader settings and user-configured `ruler` behavior,
+  binding-aware menu labels, and active-colorscheme menu colors.
+
+### TASK-011 - Implement Micro-compatible per-pane file workflows
+
+State: NEW
+
+Goal:
+
+- Give each pane Micro-compatible file identity and open/save behavior while
+  preserving the exactly-two-pane diff layout.
+
+Dependencies:
+
+- TASK-005 is `COMPLETED` so editing, focus, and the Micro key menu are stable.
+- The owner direction at the top of this plan supersedes the prototype's
+  memory-only/no-write policy.
+
+Scope:
+
+- Accept zero, one, or two file arguments before terminal initialization. Map
+  one argument to the left pane and two arguments left-to-right. Reject more
+  than two paths before entering raw terminal mode.
+- Give each pane an independent path, display name, dirty state, filetype,
+  encoding, and line-ending mode. Opening or saving one pane must never change
+  the other pane's text or filename.
+- Implement Micro's `Ctrl+O Open` and `Ctrl+S Save` actions on the focused pane.
+  Open prompts for a path and loads into that pane; Save writes to that pane's
+  existing path or prompts for a path when it is unnamed. Preserve the existing
+  file on open/save errors and report the failure through Micro's status UI.
+- When Open or New Tab would replace modified content, use Micro-compatible
+  Save/Discard/Cancel handling. Adapt `Ctrl+T New Tab` to create a new unnamed
+  document in the focused pane without creating a third pane.
+- Reuse Micro's file buffer and explicit open/save persistence paths, including
+  file metadata and the behavior Micro provides under its default settings. Do
+  not maintain a parallel mdiff file format or custom persistence stack without
+  a documented Micro limitation. TASK-011 does not load or promise compatibility
+  with user-configured backup/autosave settings; TASK-006 tests those settings
+  against these file-backed pane fixtures after configuration loading exists.
+- Render each pane's Micro-style status line above the two-row, comma-separated
+  key menu. Show filename or `No name`, `(line,column)`, `ft:<type>`,
+  line-ending mode, and encoding. Put the current Left/Right pane indicator at
+  the far right of row one. Put `mdiff (wrapping micro) v0.0.1` at the far right
+  of row two. Define one real application version value, currently `v0.0.1`, and
+  use it for this label and `--version`.
+- Keep shell, suspend, and other Micro behavior unless it conflicts with the
+  two-pane model. Document any remaining deviation with evidence and an explicit
+  owner decision.
+
+Out of scope:
+
+- Creating a third pane or abandoning shared diff-aligned vertical scrolling.
+- Replacing Micro's persistence implementation with a separate mdiff format.
+
+Acceptance criteria:
+
+- PTY and simulation-screen tests prove Ctrl+O opens into the focused pane and
+  Ctrl+S saves only that pane. Ctrl+W changes focus and never saves. Switching
+  focus changes the active filename/status data without cross-pane leakage.
+- Startup tests cover zero, one, and two file arguments, plus rejection of more
+  than two paths before raw terminal mode.
+- Tests cover an unnamed pane, independent filenames, clean and dirty Open,
+  Save/Save As, New Tab adaptation, nonexistent/unreadable paths, write errors,
+  and preservation of the prior buffer/path after failure. Persistence tests use
+  Micro's default configuration and verify explicit Open/Save effects; they do
+  not claim user-configured backup/autosave compatibility.
+- The two pane-local status lines match Micro's metadata order and formatting;
+  the shortcut menu has two rows, comma separators, exact Micro key-menu order,
+  and `^W Switch Panes` before it. The pane indicator and product/version label
+  occupy the specified right edges without hiding file metadata.
+- The product/version label and `--version` read the same application version
+  value, currently `v0.0.1`.
+- With Micro's default configuration, startup, editing, and quit follow the
+  pinned Micro persistence behavior; tests cover any default backup/autosave
+  effects identified in TASK-001 and verify explicit saves write only the
+  focused pane's content.
+- `just format`, `just lint`, `just test`, `just test-pty`, `just build`, and
+  `just vet` pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-pty`
+- `just build`
+- `just vet`
+
+Handoff:
+
+- Record Micro persistence APIs reused, path/metadata behavior, tested prompts,
+  two-pane adaptations, and any remaining differences from Micro with their
+  evidence and owner disposition.
+
 ### TASK-006 - Load Micro configuration safely
 
 State: NEW
@@ -583,13 +753,15 @@ State: NEW
 Goal:
 
 - Respect the user's existing Micro settings, keybindings, colorschemes, and
-  syntax definitions wherever they apply to two transient buffers, while
-  preserving mdiff's no-write behavior and explicit unsupported-action policy.
+  syntax definitions in both panes. Keep Micro configuration read-only; TASK-011
+  separately enables explicit document Open and Save actions.
 
 Dependencies:
 
 - TASK-005 is `COMPLETED` so safe editing actions and action filtering are
   defined.
+- TASK-011 is `COMPLETED` so configuration behavior is tested with file-backed
+  panes and per-pane status metadata.
 - Use the configuration path and read-only initialization patches recorded in
   [`micro_integration_prototype.md`](micro_integration_prototype.md).
 
@@ -598,12 +770,18 @@ Scope:
 - Work in `internal/micro/config`, `internal/micro/runtime`, and
   `internal/prototype`; update the user-facing support table in
   `design_docs/micro_diff_editor.md` and concise usage documentation.
+- Extend TASK-011's file-backed pane fixtures to verify user-configured
+  persistence settings, including backup/autosave behavior, once Micro settings
+  are loaded. TASK-011 covers Micro defaults and explicit Open/Save behavior;
+  these configuration-specific checks belong here to avoid a dependency cycle.
 - Load the standard Micro configuration directory and formats without creating
   defaults or rewriting user files. Define precedence among Micro settings,
   mdiff-specific flags, and any mdiff-namespaced settings file.
 - Apply supported buffer, rendering, mouse, paste, indentation, and color
-  settings to both panes. Honor a synthetic filetype override and Micro syntax
-  definitions without opening a file.
+  settings to both panes. Use Micro's effective defaults, including its default
+  line-number behavior, and honor the user's `ruler`, `relativeruler`, and other
+  supported settings when configured. Honor a synthetic filetype override and
+  Micro syntax definitions without opening a file.
 - Load supported `bindings.json` actions while reserving mdiff focus, quit, and
   diff-navigation controls. Reject unsafe or unavailable actions with actionable
   diagnostics.
@@ -612,7 +790,10 @@ Scope:
   built-in-only shortcut hints introduced in TASK-005 without moving the
   configuration dependency earlier.
 - Resolve configured colorschemes and document fallback behavior for
-  mdiff-specific diff styles missing from a user's scheme.
+  mdiff-specific diff styles missing from a user's scheme. Style the shortcut
+  bar using Micro's status bar colors so its foreground and background match the
+  user's active Micro colorscheme (including the dark background in the current
+  scheme).
 - Update the compatibility matrix and usage documentation with observed behavior
   rather than blanket claims of full Micro compatibility.
 
@@ -627,14 +808,27 @@ Acceptance criteria:
 - Fixture-based tests cover absent, valid, and malformed settings, bindings,
   colorscheme, and syntax files. Valid user files remain byte-for-byte unchanged
   after startup, edits, and shutdown.
+- Using the file-backed pane fixtures introduced by TASK-011, tests verify that
+  user-configured backup/autosave behavior matches Micro and that startup/edit/
+  quit creates only the persistence artifacts enabled by those settings.
 - Tests prove supported settings and keybindings affect both panes and reserved
-  or unsafe actions cannot save/open files, invoke shell commands, or escape
-  mdiff's lifecycle.
+  or unsafe actions cannot invoke shell commands or escape mdiff's lifecycle.
+  Document Open and Save behavior is covered by TASK-011.
+- Tests verify both panes match Micro's effective default line-number behavior
+  and that configured `ruler` and `relativeruler` options are applied
+  consistently to each pane.
+- Fixture tests verify every supported Micro setting affects both panes, while
+  mdiff-owned constraints such as exactly two panes and the shared diff viewport
+  remain enforced.
 - Tests verify `--diff-debounce` overrides `diff-debounce-ms` from the
   mdiff-namespaced settings file and that invalid values are rejected before
   terminal raw mode.
-- Shortcut-bar tests prove labels follow user remaps, omit removed or reserved
-  actions, and never advertise Save, Open, or New.
+- Shortcut-bar tests prove labels follow user remaps and omit removed or
+  reserved actions. TASK-011 adds Open/Save hints and tests their active-pane
+  behavior; New Tab remains unsupported.
+- Color rendering tests verify the shortcut bar uses the active Micro
+  colorscheme's status bar foreground and background, with the documented
+  fallback when those styles are unavailable.
 - Syntax highlighting works for explicitly identified synthetic buffer types
   without filesystem detection. Missing/invalid schemes produce the documented
   fallback or actionable error without losing terminal restoration.
@@ -657,59 +851,54 @@ Handoff:
   coverage, supported settings/actions, and explicit syntax/color/keybinding
   limitations.
 
-### TASK-007 - Define and implement opt-in plugin compatibility
+### TASK-007 - Complete Micro plugin compatibility within the two-pane model
 
 State: NEW
 
 Goal:
 
-- Keep plugins disabled by default and implement only a clearly documented,
-  tested compatible subset behind the existing `--enable-plugins` policy.
+- Reuse Micro's plugin startup and loading behavior by default, adapting only
+  plugin features that require more than mdiff's two panes or independent
+  vertical viewports.
 
 Dependencies:
 
 - TASK-006 is `COMPLETED` and ordinary config loading/action filtering is
   covered.
-- Plugin behavior must remain consistent with the no-write guarantee and trust
-  warning documented in [`micro_diff_editor.md`](micro_diff_editor.md).
+- TASK-011 is `COMPLETED` so plugin lifecycle tests cover file-backed panes.
+- Plugin behavior follows Micro's configured startup behavior; file and process
+  side effects are permitted as they are in Micro.
 
 Scope:
 
 - Work in `cmd/mdiff`, `internal/micro/config`, `internal/prototype`, and the
   compatibility documentation; make no changes to the upstream Micro checkout.
-- Verify CLI parsing and startup policy: installed plugins are not loaded unless
-  the user explicitly supplies `--enable-plugins` for that launch.
-- When enabled, initialize only the compatible Micro Lua/plugin lifecycle and
-  expose the two transient buffers through documented hooks. Display a
-  persistent warning that plugin code is trusted and can write files or launch
-  processes.
-- Filter or reject plugin actions that cannot be represented safely with two
-  panes, transient buffers, or a shared viewport. Do not claim sandboxing.
-- Select a small representative plugin set and document incompatibility
-  categories including file-backed assumptions, tabs/splits, shell/file writes,
-  and independent scroll state.
-- Keep plugin exceptions outside the application's built-in no-write guarantee.
-  No silent activation from Micro's installed plugin list or config.
+- Load configured plugins using Micro's normal paths, settings, and lifecycle;
+  do not require an mdiff-only opt-in.
+- Expose both panes through Micro-compatible hooks and maximize reuse of Micro's
+  plugin APIs. Preserve ordinary plugin file/process behavior.
+- Adapt plugin actions to the paired panes and shared viewport. Only features
+  that require creating more than two panes or breaking diff alignment may be
+  limited; document each such case.
+- Test representative plugins for load order, pane-local edits, file/process
+  behavior, and adaptations to the two-pane model.
 
 Out of scope:
 
-- A sandbox, capability security model, or guarantee that enabled plugins cannot
-  write buffer contents or other files.
-- Compatibility with every plugin in Micro's ecosystem.
+- A sandbox or capability security model not present in Micro.
+- Plugin features that require a third pane or independent pane scrolling.
 
 Acceptance criteria:
 
-- Tests prove that a plugin present in the user's Micro config does not load by
-  default and that the persistent warning appears whenever opt-in mode is
-  active.
-- A compatible test plugin can observe and edit the intended transient pane
+- Tests prove configured plugins load using Micro's normal startup behavior.
+- A compatible test plugin can observe and edit the intended focused pane
   through supported hooks; its changes advance the correct version and update
   the diff.
-- Incompatible plugin commands are rejected or clearly documented. A test plugin
-  fixture demonstrates that opt-in plugin effects are trusted and may write,
-  without weakening the no-write tests for the default mode.
-- Documentation states the exact trust boundary and tested compatibility set; it
-  never calls plugins sandboxed or implies enabled mode is no-write.
+- Plugin features that require a third pane or independent scroll state are
+  adapted or clearly documented. Tests verify normal Micro plugin file/process
+  effects are not blocked by mdiff-only restrictions.
+- Documentation states the tested compatibility set and any two-pane-specific
+  limitations; it does not claim a sandbox.
 - `just format`, `just lint`, `just test`, `just test-pty`, and `just build`
   pass.
 
@@ -723,12 +912,9 @@ Verification:
 
 Handoff:
 
-- Record plugins tested, hooks supported, warning behavior, unsafe-action
-  filtering, and the explicit effects excluded from the built-in no-write
-  guarantee. Identify representative fixtures by category: a compatible
-  transient-buffer edit/observer plugin, a plugin requiring a file-backed
-  buffer, one requiring tabs or splits, one changing independent scroll state,
-  and one attempting shell or filesystem writes.
+- Record plugins tested, hooks supported, and two-pane-specific adaptations.
+  Identify representative fixtures by category: pane-local editing, file
+  operations, tabs/splits, and independent scroll behavior.
 
 ### TASK-008 - Harden shared viewport and terminal interaction
 
@@ -909,13 +1095,15 @@ State: NEW
 
 Goal:
 
-- Prepare a reviewable release candidate with accurate user documentation,
-  preserved licenses, verified no-file workflow, and repeatable Linux/macOS
-  build and terminal checks.
+- Prepare a reviewable release candidate with accurate Micro-compatible user
+  documentation, preserved licenses, verified per-pane file workflow, and
+  repeatable Linux/macOS build and terminal checks.
 
 Dependencies:
 
 - TASK-003 through TASK-009 are `COMPLETED`.
+- TASK-011 is `COMPLETED` so release documentation and CLI checks cover file
+  arguments and per-pane persistence.
 - Existing Go scaffold, Just recipes, CI workflows, and Jujutsu conventions
   remain the project's supported development path.
 
@@ -924,13 +1112,13 @@ Scope:
 - Update `README.md`, `docs/`, `design_docs/`, `justfile`, and
   `.github/workflows/ci.yml` as needed; preserve upstream files and notices
   under `internal/micro/`.
-- Document launch, focus, editing, paste, diff navigation, scrolling, wrapping,
-  resize, config compatibility, plugin opt-in warning, quit, and lack of file
-  open/save behavior in the user-facing README/help.
+- Document launch, focus, editing, paste, per-pane file open/save, diff
+  navigation, scrolling, wrapping, resize, config compatibility, plugin loading,
+  and quit in the user-facing README/help.
 - Verify all Micro and third-party license notices, vendored-source pin and
   local patch inventory, and the documented upstream refresh process.
-- Review CLI behavior for unsupported positional arguments and flags; failures
-  must occur before entering raw terminal mode and must not create files.
+- Review CLI behavior for supported file arguments and flags; invalid inputs
+  must fail before entering raw terminal mode.
 - Exercise release build reproducibility and CI on supported Linux/macOS
   targets, including PTY gates where available, dependency audit, and terminal
   cleanup on normal quit and catchable interruption.
@@ -952,14 +1140,13 @@ Scope:
 
 Out of scope:
 
-- Adding file arguments, open/save/Save As, or persistent document storage.
 - Claiming macOS/terminal compatibility that has not run in CI or a documented
   manual verification environment.
 
 Acceptance criteria:
 
-- User documentation matches the tested action/config/plugin compatibility
-  matrix and explicitly states that buffers are memory-only with no save path.
+- User documentation matches the tested Micro compatibility matrix and clearly
+  explains the two-pane model, per-pane filenames, and supported file actions.
 - License and notice inventory matches the shipped Micro source and direct
   dependencies; upstream pin and patch refresh steps are reproducible.
 - Linux and macOS CI build, lint, test, and release-build jobs pass; PTY checks
@@ -968,9 +1155,9 @@ Acceptance criteria:
 - The two same-runner release builds are byte-identical for each supported
   target. The workflow records the target and verified SHA-256; a mismatch is a
   release blocker that must be diagnosed before acceptance.
-- CLI rejection, terminal restoration, normal exit, and interrupt after edits
-  are verified without buffer, backup, recovery, or config writes in default
-  mode.
+- CLI validation, terminal restoration, normal exit, and interrupt after edits
+  are verified. File writes occur through Micro-compatible explicit save and
+  configured persistence behavior; configuration files are not rewritten.
 - The complete `just check` gate passes on a clean working copy and the release
   notes list known limitations, including disabled-by-default trusted plugins.
 

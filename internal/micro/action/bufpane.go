@@ -27,6 +27,10 @@ type BufMouseAction func(*BufPane, *tcell.EventMouse) bool
 // BufBindings stores the bindings for the buffer pane type.
 var BufBindings *KeyTree
 
+// RejectedBufferBindings records bindings that mdiff deliberately disables.
+// The application can surface a concise explanation when the user invokes one.
+var RejectedBufferBindings map[string]string
+
 // BufKeyActionGeneral makes a general pane action from a BufKeyAction.
 func BufKeyActionGeneral(a BufKeyAction) PaneKeyAction {
 	return func(p Pane) bool {
@@ -43,6 +47,7 @@ func BufMouseActionGeneral(a BufMouseAction) PaneMouseAction {
 
 func init() {
 	BufBindings = NewKeyTree()
+	RejectedBufferBindings = make(map[string]string)
 }
 
 // LuaAction makes an action from a lua function. It returns either a BufKeyAction
@@ -90,12 +95,7 @@ func LuaAction(fn string, k Event) BufAction {
 
 // BufMapEvent maps an event to an action
 func BufMapEvent(k Event, action string) {
-	switch action {
-	case "Save", "SaveAll", "SaveAs", "OpenFile", "Quit", "QuitAll", "ForceQuit", "ShellMode", "CommandMode":
-		// mdiff is an in-memory editor. These actions are not part of the
-		// prototype keymap, even if they appear in the user's Micro bindings.
-		return
-	}
+	requested := action
 	config.Bindings["buffer"][k.Name()] = action
 
 	var actionfns []BufAction
@@ -118,6 +118,7 @@ func BufMapEvent(k Event, action string) {
 		}
 		if strings.HasPrefix(a, "command:") || strings.HasPrefix(a, "command-edit:") ||
 			strings.HasPrefix(a, "lua:") || prototypeUnsafeAction(a) {
+			RejectedBufferBindings[k.Name()] = requested
 			return
 		}
 
@@ -200,6 +201,31 @@ func BufMapEvent(k Event, action string) {
 	case MouseEvent:
 		BufBindings.RegisterMouseBinding(e, BufMouseActionGeneral(bufAction))
 	}
+}
+
+// RejectedBufferBindingForKey reports the disabled Micro action for a key.
+func RejectedBufferBindingForKey(e *tcell.EventKey) string {
+	return RejectedBufferBindings[keyEvent(e).Name()]
+}
+
+// BufferKeyName exposes Micro's canonical key name for mdiff-owned routing.
+func BufferKeyName(e *tcell.EventKey) string { return keyEvent(e).Name() }
+
+// RejectedBufferSequenceState reports whether sequence is a rejected binding
+// and whether it is a prefix of a longer rejected binding.
+func RejectedBufferSequenceState(sequence string) (action string, exact, prefix bool) {
+	for binding, rejected := range RejectedBufferBindings {
+		if binding == sequence {
+			action, exact = rejected, true
+		}
+		if strings.HasPrefix(binding, sequence) && len(binding) > len(sequence) {
+			if action == "" {
+				action = rejected
+			}
+			prefix = true
+		}
+	}
+	return action, exact, prefix
 }
 
 func prototypeUnsafeAction(name string) bool {

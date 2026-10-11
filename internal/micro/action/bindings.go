@@ -36,6 +36,13 @@ func createBindingsIfNotExist(fname string) {
 
 // InitBindings intializes the bindings map by reading from bindings.json
 func InitBindings() {
+	BufBindings = NewKeyTree()
+	RejectedBufferBindings = make(map[string]string)
+	InfoBindings = NewKeyTree()
+	InfoBufBindings = NewKeyTree()
+	config.Bindings = map[string]map[string]string{
+		"buffer": {}, "command": {}, "terminal": {},
+	}
 	var parsed map[string]any
 
 	filename := filepath.Join(config.ConfigDir, "bindings.json")

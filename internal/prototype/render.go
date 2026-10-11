@@ -150,7 +150,8 @@ func sourceRuneLocations(p *pane, line int, runes []rune) []display.VLoc {
 		return locations
 	}
 
-	bufWidth := p.width
+	bufView := p.view.BufView()
+	bufWidth := bufView.Width
 	if bufWidth <= 0 {
 		return locations
 	}
@@ -201,6 +202,7 @@ func sourceRuneLocations(p *pane, line int, runes []rune) []display.VLoc {
 
 func markVisualRange(rows [][]renderedCell, start, end display.VLoc, runeIndex int, p *pane) {
 	softwrap := p.buf.Settings["softwrap"].(bool)
+	contentStart := p.view.BufView().X
 	startX, endX := start.VisualX, end.VisualX
 	if !softwrap {
 		startX -= p.view.StartCol
@@ -210,12 +212,12 @@ func markVisualRange(rows [][]renderedCell, start, end display.VLoc, runeIndex i
 		if row < 0 || row >= len(rows) {
 			continue
 		}
-		from, to := 0, p.width
+		from, to := contentStart, p.width
 		if row == start.Row {
-			from = startX
+			from = contentStart + startX
 		}
 		if row == end.Row {
-			to = endX
+			to = contentStart + endX
 		}
 		from = max(0, from)
 		to = min(p.width, to)

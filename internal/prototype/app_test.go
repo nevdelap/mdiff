@@ -35,11 +35,14 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 	if app.left.buf.LinesNum() != 1 || app.right.buf.LinesNum() != 1 {
 		t.Fatal("new panes are not empty")
 	}
+	if app.left.buf.Settings["ruler"] != true || app.right.buf.Settings["ruler"] != true {
+		t.Fatalf("panes do not preserve Micro's default line-number setting: left=%v right=%v", app.left.buf.Settings["ruler"], app.right.buf.Settings["ruler"])
+	}
 
 	leftText := "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"
 	rightText := "one\ninserted\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"
 	app.handle(tcell.NewEventPaste(leftText, ""))
-	app.handle(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone, ""))
+	app.handle(tcell.NewEventKey(tcell.KeyCtrlW, 0, tcell.ModCtrl, ""))
 	app.handle(tcell.NewEventPaste(rightText, ""))
 	flushDiffForTest(t, app)
 	if app.versions.Left != 1 || app.versions.Right != 1 {
@@ -114,7 +117,7 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.handle(tcell.NewEventResize(24, 8))
-	if app.cols != 24 || app.rows != 7 {
+	if app.cols != 24 || app.rows != 4 {
 		t.Fatalf("resize dimensions are cols=%d rows=%d", app.cols, app.rows)
 	}
 	app.draw()
@@ -202,7 +205,7 @@ func TestLargePasteStaysResponsiveAndInstallsFinalAlignment(t *testing.T) {
 	app.draw()
 	var footer strings.Builder
 	for x := 0; x < app.cols; x++ {
-		r, _, _, _ := sim.GetContent(x, app.rows)
+		r, _, _, _ := sim.GetContent(x, app.statusRow)
 		footer.WriteRune(r)
 	}
 	if !strings.Contains(footer.String(), "Diff updating") {

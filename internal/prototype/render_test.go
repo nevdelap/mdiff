@@ -26,12 +26,14 @@ func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
 	withColorscheme(t, colors)
 
 	app.draw()
-	assertCellStyle(t, app.surface, 1, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
-	assertCellStyle(t, app.surface, app.right.x+1, 0, tcell.ColorGreen, tcell.ColorDarkBlue, 0)
+	leftTextX := app.left.view.BufView().X
+	rightTextX := app.right.view.BufView().X
+	assertCellStyle(t, app.surface, leftTextX+1, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+	assertCellStyle(t, app.surface, rightTextX+1, 0, tcell.ColorGreen, tcell.ColorDarkBlue, 0)
 
 	app.left.h.Cursor.CurSelection = [2]buffer.Loc{{X: 1, Y: 0}, {X: 2, Y: 0}}
 	app.draw()
-	assertCellStyle(t, app.surface, 1, 0, tcell.ColorYellow, tcell.ColorBlue, 0)
+	assertCellStyle(t, app.surface, leftTextX+1, 0, tcell.ColorYellow, tcell.ColorBlue, 0)
 
 	app.left.h.Cursor.ResetSelection()
 	app.left.h.Cursor.GotoLoc(buffer.Loc{X: 1, Y: 0})
@@ -42,7 +44,7 @@ func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
 	rightSelection := app.right.h.Cursor.CurSelection
 	rightUndo, rightRedo := app.right.buf.UndoStack.Len(), app.right.buf.RedoStack.Len()
 	app.draw()
-	_, _, attrs := cellStyle(app.surface, 1, 0)
+	_, _, attrs := cellStyle(app.surface, leftTextX+1, 0)
 	if attrs&tcell.AttrReverse == 0 {
 		t.Fatalf("focused cursor did not override changed-character style: attrs=%b", attrs)
 	}
@@ -77,24 +79,25 @@ func TestRenderCharacterDiffMapsTabsWideRunesAndCombiningMarks(t *testing.T) {
 	})
 
 	leftCells := app.renderMicroLine(&app.left, 0)
-	if got := leftCells[0][1].sourceRune; got != 1 {
+	textStart := app.left.view.BufView().X - app.left.x
+	if got := leftCells[0][textStart+1].sourceRune; got != 1 {
 		t.Fatalf("first tab cell maps to rune %d, want tab rune 1", got)
 	}
-	if got := leftCells[0][3].sourceRune; got != 1 {
+	if got := leftCells[0][textStart+3].sourceRune; got != 1 {
 		t.Fatalf("tab expansion cell maps to rune %d, want tab rune 1", got)
 	}
-	if got := leftCells[0][4].sourceRune; got != 2 {
+	if got := leftCells[0][textStart+4].sourceRune; got != 2 {
 		t.Fatalf("wide rune maps to rune %d, want rune 2", got)
 	}
-	if got := leftCells[0][6].sourceRune; got != 3 {
+	if got := leftCells[0][textStart+6].sourceRune; got != 3 {
 		t.Fatalf("combining sequence base maps to rune %d, want rune 3", got)
 	}
 
 	app.draw()
-	assertCellStyle(t, app.surface, 4, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
-	assertCellStyle(t, app.surface, 5, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
-	assertCellStyle(t, app.surface, 6, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
-	_, _, tabAttrs := cellStyle(app.surface, 1, 0)
+	assertCellStyle(t, app.surface, textStart+4, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+	assertCellStyle(t, app.surface, textStart+5, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+	assertCellStyle(t, app.surface, textStart+6, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+	_, _, tabAttrs := cellStyle(app.surface, textStart+1, 0)
 	if tabAttrs&tcell.AttrReverse != 0 {
 		t.Fatal("unchanged tab received a change style")
 	}

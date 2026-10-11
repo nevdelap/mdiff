@@ -1,14 +1,15 @@
 # New Tasks Specification Review
 
 **Reviewer:** Rufus\
-**Review pass:** 5\
-**Scope:** `TASK-003` through `TASK-010` in the implementation plan
+**Review pass:** 7\
+**Scope:** `TASK-003` through `TASK-011` in plan order; task IDs are unchanged
 
 ## Decision
 
-All findings from passes 1 through 4 are addressed. TASK-003 has since been
-implemented and independently approved; TASK-004 through TASK-010 remain ready
-for implementation subject to their stated dependencies and verification gates.
+All eight specification findings are addressed. TASK-003 and TASK-005 are
+completed and reviewed. TASK-011 is correctly positioned immediately after
+TASK-005 without renumbering; its default-persistence scope is separated from
+configuration-specific behavior in TASK-006, avoiding a dependency cycle.
 
 TASK-003 is now `COMPLETED` in the implementation plan. The plan remains the
 source of truth.
@@ -155,7 +156,10 @@ and
 - **TASK-004:** Debounce configuration, large-paste thresholds, and timer tests
   are now specified.
 - **TASK-005:** The built-in-only shortcut bar is separated from user binding
-  remaps, which TASK-006 owns.
+  remaps, which TASK-006 owns; it is completed and reviewed.
+- **TASK-011:** Its default-persistence scope is ready after TASK-005; TASK-006
+  adds and tests user-configured persistence behavior using its file-backed
+  pane fixtures.
 - **TASK-006:** Ready. Its configuration tests explicitly verify that the CLI
   debounce option overrides the mdiff settings-file value.
 - **TASK-007:** Ready. The handoff names the compatible transient-buffer plugin
@@ -181,3 +185,25 @@ that mismatch. Pass 5 rechecked the remaining task specs and records the
 completed TASK-003 implementation review. All seven recorded specification
 findings are addressed. Markdownlint and the pinned `mdformat --check` on this
 review document passed after formatting.
+
+## Pass 7 addendum — TASK-011
+
+### 8. High — TASK-011 requires configured persistence before TASK-006 loads configuration
+
+**Status:** Resolved in pass 7
+
+The updated plan now limits TASK-011 to Micro's default persistence behavior
+and explicit Open/Save operations. It explicitly defers user-configured
+backup/autosave compatibility to TASK-006, which loads configuration and uses
+TASK-011's file-backed fixtures. This resolves the sequencing gap without
+moving or renumbering either task.
+
+The requested scope split is present in TASK-011 and TASK-006.
+
+Evidence: TASK-011 now defers user-configured persistence behavior at
+[`implementation_plan.md`](/home/nevd/mdiff/design_docs/implementation_plan.md:691).
+TASK-006 uses TASK-011's file-backed fixtures to test those settings at
+[`implementation_plan.md`](/home/nevd/mdiff/design_docs/implementation_plan.md:773).
+
+TASK-011 remains immediately after TASK-005 in the implementation plan. The
+task IDs and the order of all other tasks are unchanged.

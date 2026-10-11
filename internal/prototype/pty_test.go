@@ -32,23 +32,22 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	}
 	transcript := capturePTY(t, terminal)
 	defer func() { _ = terminal.Close() }()
-	transcript.waitFor(t, []byte("F6: switch"))
+	transcript.waitFor(t, []byte("^Q Quit"))
 	transcript.waitForCursorInColumnSince(t, 0, 1, 21)
-
 	left := numberedLines("L", 24)
 	right := numberedLines("R", 24)
 	right = "INSERT\n" + right
 	writePTY(t, terminal, []byte("\x1b[200~"+left+"\x1b[201~"))
 	transcript.waitFor(t, []byte("L23"))
 	focusRightStart := transcript.mark()
-	writePTY(t, terminal, []byte("\x1b[17~")) // Focus right.
+	writePTY(t, terminal, []byte{0x17}) // Ctrl+W switches panes.
 	transcript.waitForCursorInColumnSince(t, focusRightStart, 22, 42)
 	writePTY(t, terminal, []byte("\x1b[200~"+right+"\x1b[201~"))
 	transcript.waitFor(t, []byte("R23"))
 
 	// Scroll upward from the left pane until the first left line is visible.
 	focusLeftStart := transcript.mark()
-	writePTY(t, terminal, []byte("\x1b[17~")) // Focus left.
+	writePTY(t, terminal, []byte{0x17}) // Ctrl-W is the reliable focus-switch fallback.
 	transcript.waitForCursorInColumnSince(t, focusLeftStart, 1, 21)
 	leftScrollStart := transcript.mark()
 	writePTY(t, terminal, bytes.Repeat([]byte("\x1b[1;5A"), 24))
@@ -58,7 +57,7 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	// from that pane. Each checkpoint waits for the corresponding content to be
 	// painted instead of relying on a scheduler-dependent delay.
 	focusRightStart = transcript.mark()
-	writePTY(t, terminal, []byte("\x1b[17~")) // Focus right.
+	writePTY(t, terminal, []byte{0x17}) // Ctrl+W switches panes.
 	transcript.waitForCursorInColumnSince(t, focusRightStart, 22, 42)
 	rightHomeStart := transcript.mark()
 	writePTY(t, terminal, []byte("\x1b[1;5H")) // Ctrl-Home.
@@ -95,7 +94,7 @@ func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcript := capturePTY(t, terminal)
-	transcript.waitFor(t, []byte("F6: switch"))
+	transcript.waitFor(t, []byte("^Q Quit"))
 	writePTY(t, terminal, []byte("\x1b[200~ABORT-MARKER\x1b[201~"))
 	transcript.waitFor(t, []byte("ABORT-MARKER"))
 	if err := cmd.Process.Signal(os.Interrupt); err != nil {

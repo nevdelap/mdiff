@@ -5,6 +5,24 @@
 **Scope:** Architecture and implementation plan; no application code is
 specified by this document as complete.
 
+## Owner direction
+
+**mdiff should work like Micro in every way except for its two-pane
+specialness.** Micro's existing behavior and code are the baseline. Maximize
+code reuse and minimize differences from the pinned Micro source. The only
+intended product-level distinction is the paired, diff-aligned panes and the
+shared viewport they require. Preserve ordinary Micro file handling, per-pane
+filenames, keybindings, prompts, status bars, two-row comma-separated key menu,
+settings, colorschemes, syntax, and plugin behavior. Adapt only behavior that
+requires more than two panes or breaks shared diff alignment; any other
+limitation needs an explicit owner decision.
+
+The owner has superseded the prototype's memory-only/no-write rule. Ctrl+W
+switches panes, while Micro's Ctrl+S Save and Ctrl+O Open act on the focused
+pane. The detailed acceptance criteria are in
+[`implementation_plan.md`](implementation_plan.md), especially TASK-011, which
+is ordered immediately after TASK-005 without renumbering task IDs.
+
 ## Executive summary
 
 `mdiff` is a standalone Go terminal application with two empty, editable text
@@ -62,9 +80,9 @@ Git-specific workflow is required.
   virtual rows for unmatched lines without changing either text buffer.
 - Keep both panes aligned under scrolling, cursor navigation, difference
   navigation, mouse wheel input, wrapping, and terminal resize.
-- Keep all document data in memory. With plugins disabled, mdiff never saves or
-  recovers buffer contents from disk on exit. Explicitly enabling trusted Lua
-  plugins opts out of the guarantee for plugin side effects.
+- Use Micro's file lifecycle for each pane, including per-pane filenames,
+  explicit Open/Save, and configured persistence behavior. Do not replace it
+  with a custom no-write buffer lifecycle.
 - Remain responsive for large paste operations and avoid holding multiple
   avoidable full copies of the text.
 - Restore terminal state after normal exit, handled signals, and returned
@@ -74,7 +92,6 @@ Git-specific workflow is required.
 
 ### Non-goals
 
-- Opening, reloading, saving, or saving as a file.
 - A merge tool, three-way comparison, filesystem watcher, or Git/Jujutsu
   integration in the product.
 - A complete reimplementation of Micro or support for arbitrary non-Micro
@@ -316,12 +333,9 @@ are unsandboxed trusted code. The normal `lua.L` initialization is in
 `cmd/micro/initlua.go` (a `package main` file), not the reusable internal
 packages. However, buffer/pane constructors and callbacks unconditionally call
 `luar.New(ulua.L, value)` even when the plugin list is empty; `luar.New` needs a
-non-nil Lua state for pointer arguments. The no-plugin app still needs to
-initialize an empty Lua state or patch those callback adapters to avoid Lua
-conversion when plugins are disabled. Plugin support later needs to move the
-Micro Lua bridge initialization behind an explicit mdiff-owned API. TASK-001's
-product policy remains plugins disabled by default and explicit opt-in for the
-trusted, no-write-exempt plugin mode.
+non-nil Lua state for pointer arguments. The app must initialize Micro's Lua
+bridge and load configured plugins through Micro's normal startup behavior. This
+supersedes the initial prototype's plugin opt-in policy.
 
 **Verified terminal/event route:** `screen.Init` initializes tcell, applies the
 configured paste and mouse settings, and must be paired with `Screen.Fini`.
@@ -470,40 +484,37 @@ path is `github.com/nevdelap/mdiff`. The pinned source closure and import
 mapping above were compile-probed before any product source was copied.
 
 `cmd/mdiff` calls an app constructor and owns signal handling. `internal/app`
-owns exactly two transient buffers, two editor panes, one comparison worker, one
+owns exactly two Micro buffers, two editor panes, one comparison worker, one
 alignment map, one viewport, and one terminal session. Avoid Micro package
 globals leaking across multiple app instances in tests; add an explicit reset or
 dependency container for config, open buffers, screen, and plugin state.
 
 ### Lifecycle
 
-1. Parse no-argument launch and mdiff-owned options such as `--help`,
-   `--version`, `--config-dir`, `--enable-plugins`, and optional initial
-   filetype. Reject file operands because opening files is out of scope.
-2. Initialize Micro config paths and read existing options, bindings, schemes,
-   and syntax definitions without modifying user configuration or creating
-   document backups. Do not load plugins unless `--enable-plugins` was
-   explicitly supplied. If config initialization creates the normal Micro
-   configuration directory, that side effect is the existing Micro behavior; do
-   not write buffer data there.
+1. Parse Micro-compatible launch options and zero, one, or two file operands.
+   Assign file operands left-to-right to the two panes and reject more than two
+   before terminal initialization. Use the real application version for
+   `--version` and the footer.
+2. Initialize Micro config paths and load existing options, bindings, schemes,
+   syntax definitions, and configured plugins using Micro's normal behavior.
+   Keep Micro configuration files unchanged unless Micro itself would modify
+   them as part of its normal operation.
 3. Initialize tcell and install a deferred, idempotent `Fini` path before
    starting the event loop. Register signal handling for interrupt and
    termination signals; cancellation exits through the same cleanup. Avoid
    attempting unsafe terminal work from signal handlers.
-4. Construct two empty `BTTransient` buffers. Set independent display names such
-   as `Left` and `Right`; allow optional filetype override to configure syntax
-   rules without presenting a disk path. Initialize a normal Micro `BufPane`
-   around each.
+4. Construct two Micro buffers, loaded from their corresponding file operands or
+   as unnamed buffers. Keep independent paths, names, metadata, and editor
+   state. Initialize a normal Micro `BufPane` around each.
 5. Set both panes' vertical view adapter to the shared viewport controller.
-   Configure a two-column layout, a status area with focus and diff state, and a
-   Micro-style shortcut bar at the bottom edge.
+   Configure a two-column layout, a Micro status line per pane, a shared
+   transient-message area, and Micro's two-row key menu at the bottom edge.
 6. Render, route terminal events, apply edits through Micro actions, schedule
    comparison after content changes, and install only results whose versions
    match both current buffers.
-7. On quit or signal, stop comparison workers, disable timers, close transient
-   buffers through a no-write teardown path, call tcell `Fini`, and return. No
-   serialization, backup, save prompt, recovery file, or stdout buffer flush is
-   allowed.
+7. On quit or signal, follow Micro's configured buffer save, backup, recovery,
+   and teardown behavior for each pane. Stop comparison workers and timers,
+   finalize both buffers, call tcell `Fini`, and return.
 
 ### Buffer ownership and editing
 
@@ -513,18 +524,10 @@ receives immutable content snapshots only; it never mutates either buffer. A
 monotonically increasing content version accompanies every buffer mutation,
 including undo/redo and paste.
 
-Add a `BTTransient` or equivalent constructor in the Micro fork with these
-invariants:
-
-- No filesystem path is opened, statted, watched, or used for recovery.
-- No autosave, backup, serialized cursor/undo state, save prompt, file reload,
-  or document write is reachable from the normal action map.
-- `Fini` drops in-memory state and cancels any timers without calling
-  `Serialize`, `RequestBackup`, or file operations.
-- The buffer remains syntax-enabled and editable; `BTScratch`'s current
-  syntax-disabled settings are not a substitute.
-- Each buffer has independent undo/redo and cursor state; shared text state is
-  never used across sides.
+Reuse Micro's normal file-backed and unnamed buffer constructors. Preserve its
+configured load, save, backup, recovery, syntax, and finalization behavior for
+each pane. Each buffer has independent undo/redo and cursor state; shared text
+state is never used across sides.
 
 Interpose on the Micro mutation/event-handler boundary so every text change
 increments a version and sends a coalescible
@@ -534,62 +537,56 @@ which is reset by rendering and is not a stable change stream.
 
 ### Configuration and plugin compatibility
 
-Read the standard Micro config directory and standard file formats. Do not copy
-Micro defaults over user files or write mdiff-only settings into
-`settings.json`; mdiff-specific overrides belong in command flags or a
-namespaced `mdiff.json`/TOML file. Preserve Micro's option values and keybinding
-action names where actions exist. Use synthetic buffer names and an explicit
-optional filetype to get syntax behavior without file I/O.
+Read the standard Micro config directory and file formats using Micro's normal
+precedence and filetype behavior. Preserve Micro's option values and keybinding
+action names. Do not copy defaults over user files or put mdiff-only settings
+into `settings.json`; mdiff-specific overrides belong in command flags or a
+namespaced `mdiff.json`/TOML file.
 
-| Micro feature                  | Planned behavior                                                                                                                          | Compatibility limit                                                                                                                                                                                                                                                                                            |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `settings.json` global options | Load and apply options relevant to buffers, terminal colors, mouse, paste, and rendering                                                  | Options for tabs, file reload, backup, save, shell, or unrelated panes are ignored or forced safe                                                                                                                                                                                                              |
-| `bindings.json`                | Load Micro buffer bindings; retain built-in editing actions                                                                               | Actions that open files, save/write, run commands, suspend the app, or depend on ordinary splits are disabled or remapped                                                                                                                                                                                      |
-| `colorschemes/`                | Load selected scheme and use Micro's syntax and UI styles                                                                                 | mdiff adds a documented small set of diff-specific style names, with sensible fallback when absent                                                                                                                                                                                                             |
-| `syntax/`                      | Use Micro syntax definitions and filetype matching                                                                                        | Runtime syntax files work for synthetic names/filetype override; file-on-disk detection is absent                                                                                                                                                                                                              |
-| Lua plugins and `plug/`        | Disabled by default; load compatible plugins only with the explicit `--enable-plugins` opt-in and compatible Micro lifecycle/action hooks | Enabled plugins are trusted code with the application's filesystem and process privileges. Their effects are outside mdiff's no-write guarantee; display a persistent warning while they are enabled. Plugins that save/reload/open files, assume one active tab, or control split offsets remain unsupported. |
-| Micro commands                 | Retain safe editing commands and command-line action behavior where feasible                                                              | `save`, `saveas`, `open`, `reload`, and shell/file commands are removed or return a clear unsupported message                                                                                                                                                                                                  |
-| Micro clipboard                | Terminal bracketed paste is supported; Micro's configured clipboard integration may be used for explicit copy/paste actions               | External clipboard tools vary by OS and plugin; terminal paste is the required baseline                                                                                                                                                                                                                        |
+| Micro feature                   | Planned behavior                                                                                                                                                                                                                                                                                                                                            | Compatibility limit                                                                                                                                           |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `settings.json` global options  | Apply Micro settings to both panes, including indentation, rendering, terminal colors, mouse, paste, wrapping, line numbers, file reload, backup, and save behavior. Use Micro's effective defaults and honor configured values.                                                                                                                            | Adapt only settings that require more than two panes or break shared diff alignment                                                                           |
+| `bindings.json`                 | Load Micro buffer bindings; cursor, selection, editing, clipboard, indentation, in-buffer autocomplete, undo/redo, search, Open, and Save actions apply to the focused pane                                                                                                                                                                                 | Only actions requiring more than two panes or breaking shared diff alignment are adapted; user remapping behavior is completed in TASK-006                    |
+| `colorschemes/`                 | Load selected scheme and use Micro's syntax and UI styles                                                                                                                                                                                                                                                                                                   | mdiff adds a documented small set of diff-specific style names, with sensible fallback when absent                                                            |
+| `syntax/`                       | Use Micro syntax definitions and filetype matching for each pane's loaded filename or explicit filetype                                                                                                                                                                                                                                                     | Adapt only filetype behavior that conflicts with the two-pane model                                                                                           |
+| Lua plugins and `plug/`         | Load configured plugins through Micro's normal startup and lifecycle                                                                                                                                                                                                                                                                                        | Adapt only behavior that requires more than two panes or breaks the shared diff viewport                                                                      |
+| Micro commands                  | Use Micro's command dispatcher and support ordinary Micro commands in the focused pane                                                                                                                                                                                                                                                                      | Adapt only commands that require more than two panes or break shared diff alignment                                                                           |
+| Micro clipboard                 | Use Micro's internal clipboard and configured external clipboard behavior                                                                                                                                                                                                                                                                                   | Adapt only clipboard behavior that requires more than two panes or breaks diff alignment                                                                      |
+| Bottom key menu and pane status | Render two comma-separated rows in Micro's exact key-menu order, prefixed by `^W Switch Panes`; use the active scheme's status-bar colors. Show `Left`/`Right` at the right of row one and `mdiff (wrapping micro) v0.0.1` at the right of row two. Each pane has a Micro status line with filename, cursor position, filetype, line endings, and encoding. | Adapt New Tab to replace the focused pane's document without adding a third pane; TASK-006 owns user-remapped labels and status-color compatibility/fallbacks |
 
-Arbitrary Lua plugins can perform effects outside the buffer API. The product
-guarantee is bounded: mdiff's built-in behavior never writes, serializes, backs
-up, or recovers either document, but explicitly enabled Lua plugins are trusted
-code and can access filesystem or process APIs. The whole-process no-write
-guarantee does not cover plugin side effects. Plugins are disabled by default
-and require `--enable-plugins` on each launch; do not enable them solely because
-the user's Micro configuration has plugins installed. When enabled, show a
-persistent warning that plugin code can write buffer contents or other files.
-Never describe plugins as sandboxed. A future restricted plugin mode requires a
-separate design and security audit.
+Micro plugins execute with the same filesystem and process access they have in
+Micro. Load them through Micro's configured startup behavior and do not impose a
+separate opt-in or no-write restriction. Adapt a plugin only when its behavior
+requires more than two panes or breaks shared diff alignment; document any such
+case with evidence. Do not claim plugins are sandboxed.
 
-### Bottom shortcut bar
+### Micro-style status lines and key menu
 
-Use Micro's compact bottom key-hint treatment and its configured color scheme
-for the shortcut bar. Keep it visually distinct from the diff/status area and
-the two text panes. The initial supported hints are `^Q Quit`, `^G Help`,
-`^E Command Bar`, `^K Cut Line`, `^F Find`, `^Z Undo`, `^Y Redo`,
-`^A Select All`, and `^D Duplicate Line`. A hint is shown only when that action
-is available and the displayed key sequence matches the effective binding; if a
-user remaps a listed action, render the effective binding or omit the hint when
-it cannot be represented compactly. mdiff-owned reserved bindings take
-precedence over conflicting Micro bindings and must be reflected accurately.
+Render each pane's Micro status line immediately above the shared two-row key
+menu. The status line shows filename or `No name`, `(line,column)`, `ft:<type>`,
+line-ending mode, and encoding, using the active Micro colorscheme. Transient
+prompts and messages remain available without replacing either pane's status
+line.
 
-Do not advertise `^S Save`, `^O Open`, or `^T New`. mdiff has exactly two
-in-memory panes and intentionally has no file open, save, Save As, or new-buffer
-operation. Their absence from the bar must agree with the action filter and
-command bar so the interface never implies document persistence.
+Render the key menu with Micro's commas and exact built-in order, prefixed by
+the mdiff pane-switch key:
 
-The bar is a single terminal row and must not wrap over editor cells. At narrow
-widths, omit lower-priority hints in a deterministic order while retaining
-`^Q Quit` whenever the terminal can render it; show no partial label. The status
-area may expose focus and diff freshness separately. Initially, before TASK-006
-configuration loading, hints use the pinned Micro built-in bindings. After
-TASK-006 they use the effective user-configured binding, with mdiff reserved
-actions taking precedence. Pane resize/layout code must reserve both rows before
-calculating pane widths/heights, and the real terminal cursor must remain in a
-pane rather than being placed on either bar. Simulation-screen tests should
-cover the full hint set, remapped/missing bindings, disabled actions, and
-progressively narrow widths.
+- Row one:
+  `^W Switch Panes, ^Q Quit, ^S Save, ^O Open, ^G Help, ^E Command Bar, ^K Cut Line`
+- Row two:
+  `^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New Tab`
+
+Display the active `Left`/`Right` pane at the right edge of row one. Display
+`mdiff (wrapping micro) v0.0.1` at the right edge of row two. The footer and
+`--version` output use the same real application version source. Keep the menu
+and right-aligned metadata from colliding at supported terminal widths; reserve
+the status and both menu rows before calculating pane dimensions and keep the
+real terminal cursor in the active pane or prompt.
+
+TASK-006 resolves remapped labels from effective bindings and supplies status
+colors from the user's active Micro colorscheme. Any remaining behavior
+differences must be limited to the two-pane model and recorded with owner
+disposition.
 
 ### Diff computation
 
@@ -1118,13 +1115,14 @@ rendering and property tests prove span correctness; deterministic coordinator
 tests prove stale results cannot replace current content and input handling
 stays responsive.
 
-### Phase 3: Editing and configuration compatibility (TASK-005–TASK-007)
+### Phase 3: Editing, file workflows, and configuration compatibility
 
-Complete supported Micro editing actions, load user settings/keybindings/
-colors/syntax without writing config, and separately implement the documented
-trusted-plugin opt-in. **Exit gate:** fixture and integration tests cover the
-compatibility matrix, default-mode no-write behavior, rejected actions, and
-plugin trust warning.
+(TASK-005, TASK-011, TASK-006–TASK-007)
+
+Complete Micro editing actions, add the per-pane file workflow, then load user
+settings/keybindings/colors/syntax and plugins through Micro's normal behavior.
+**Exit gate:** fixture and integration tests cover Micro compatibility and the
+remaining two-pane-specific adaptations.
 
 ### Phase 4: Shared viewport and performance hardening (TASK-008–TASK-009)
 
@@ -1144,20 +1142,20 @@ and an accurate compatibility and limitation statement.
 
 ## Risks and mitigations
 
-| Risk                                                        | Impact                                                                | Mitigation                                                                                                                                                     |
-| ----------------------------------------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Micro is not a stable embedding API and uses global state   | Integration and test isolation can become fragile                     | Keep a namespaced subtree, pin upstream, isolate globals behind app construction, prototype first                                                              |
-| Go `internal` restriction blocks direct import              | A standalone module cannot import Micro internals                     | Rehome Micro packages from upstream `internal/<pkg>` to `mdiff/internal/micro/<pkg>` and rewrite imports; compile-probe host imports from `mdiff/internal/app` |
-| `BufWindow` rendering assumes independent view offsets      | Independent scroll can undo alignment on every action                 | Replace relocation ownership with a shared viewport adapter and row provider; validate in Phase 1                                                              |
-| Scratch close may serialize state                           | Data can be written on exit despite no Save command                   | Add a dedicated transient type and tests for every teardown path                                                                                               |
-| Micro plugins can make arbitrary filesystem/process changes | A plugin may write buffer contents despite built-in no-write behavior | Disable plugins by default; require `--enable-plugins`, state that plugin side effects are outside the no-write guarantee, and show a persistent warning       |
-| Micro update churn and local patch conflicts                | Maintenance cost and delayed security fixes                           | Pin SHA, keep patch series narrow, schedule upstream sync, run tests against candidate updates                                                                 |
-| Diff worst-case runtime/memory                              | UI stalls after large paste                                           | Debounce, one worker, cancellation/version drops, thresholds, timeout fallback, benchmark adversarial inputs                                                   |
-| Diff alignment can be ambiguous with repeated lines         | Jumps or unstable hunk movement                                       | Deterministic tie-break, contextual anchoring, preserve old anchor/cursor, test duplicate content                                                              |
-| Two lines with unequal wrap heights complicate comparison   | Alignment can appear to insert content rows                           | Define pair height as max wrap height and draw continuation blanks; test all wrap cases                                                                        |
-| Terminal variations in paste, mouse, resize, true color     | Different interaction behavior across terminals                       | Use tcell capabilities, simulation tests, Linux/macOS PTY matrix, explicit capability fallback                                                                 |
-| Micro config includes commands that do not apply to mdiff   | Unexpected writes, broken bindings                                    | Filter unsupported actions with clear diagnostics and document limits                                                                                          |
-| Upstream/embedded licenses and attribution are missed       | Distribution/legal defect                                             | Preserve Micro license/third-party notices, inventory vendored dependencies, include notices in releases                                                       |
+| Risk                                                        | Impact                                                            | Mitigation                                                                                                                                                     |
+| ----------------------------------------------------------- | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Micro is not a stable embedding API and uses global state   | Integration and test isolation can become fragile                 | Keep a namespaced subtree, pin upstream, isolate globals behind app construction, prototype first                                                              |
+| Go `internal` restriction blocks direct import              | A standalone module cannot import Micro internals                 | Rehome Micro packages from upstream `internal/<pkg>` to `mdiff/internal/micro/<pkg>` and rewrite imports; compile-probe host imports from `mdiff/internal/app` |
+| `BufWindow` rendering assumes independent view offsets      | Independent scroll can undo alignment on every action             | Replace relocation ownership with a shared viewport adapter and row provider; validate in Phase 1                                                              |
+| File-backed pane lifecycle can diverge from Micro           | Data loss or inconsistent save/backup behavior                    | Reuse Micro buffer constructors and persistence paths; test both panes and configured lifecycle behavior                                                       |
+| Micro plugins can make arbitrary filesystem/process changes | Plugin effects can affect files and processes as they do in Micro | Reuse Micro's plugin loading and lifecycle; document only the two-pane-specific compatibility limits                                                           |
+| Micro update churn and local patch conflicts                | Maintenance cost and delayed security fixes                       | Pin SHA, keep patch series narrow, schedule upstream sync, run tests against candidate updates                                                                 |
+| Diff worst-case runtime/memory                              | UI stalls after large paste                                       | Debounce, one worker, cancellation/version drops, thresholds, timeout fallback, benchmark adversarial inputs                                                   |
+| Diff alignment can be ambiguous with repeated lines         | Jumps or unstable hunk movement                                   | Deterministic tie-break, contextual anchoring, preserve old anchor/cursor, test duplicate content                                                              |
+| Two lines with unequal wrap heights complicate comparison   | Alignment can appear to insert content rows                       | Define pair height as max wrap height and draw continuation blanks; test all wrap cases                                                                        |
+| Terminal variations in paste, mouse, resize, true color     | Different interaction behavior across terminals                   | Use tcell capabilities, simulation tests, Linux/macOS PTY matrix, explicit capability fallback                                                                 |
+| Micro config includes commands that do not apply to mdiff   | Unexpected writes, broken bindings                                | Filter unsupported actions with clear diagnostics and document limits                                                                                          |
+| Upstream/embedded licenses and attribution are missed       | Distribution/legal defect                                         | Preserve Micro license/third-party notices, inventory vendored dependencies, include notices in releases                                                       |
 
 ## Unresolved questions
 
