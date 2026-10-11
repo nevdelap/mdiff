@@ -23,6 +23,7 @@ type Row struct {
 	Left, Right Cell
 	Kind        compare.Kind
 	PairIndex   int
+	Changes     []compare.ChangeSpan
 }
 
 // Layout contains expanded rows and source line maps for the current widths.
@@ -47,7 +48,7 @@ func Expand(pairs []compare.Pair, leftHeight, rightHeight func(int) int) Layout 
 		}
 		height := max(lh, rh)
 		for subrow := range height {
-			row := Row{Kind: pair.Kind, PairIndex: pairIndex}
+			row := Row{Kind: pair.Kind, PairIndex: pairIndex, Changes: pair.Changes}
 			row.Left = alignedCell(pair.Left, subrow, lh)
 			row.Right = alignedCell(pair.Right, subrow, rh)
 			layout.Rows = append(layout.Rows, row)

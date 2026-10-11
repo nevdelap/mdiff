@@ -650,11 +650,22 @@ const ( Left Side = iota; Right )
 type ChangeKind uint8
 const ( Equal ChangeKind = iota; Changed; LeftOnly; RightOnly )
 
+type RuneSpan struct {
+    Start int // inclusive Unicode rune offset in the source line
+    End   int // exclusive Unicode rune offset
+}
+
+type ChangeSpan struct {
+    Left  RuneSpan
+    Right RuneSpan
+}
+
 type AlignedLine struct {
     LeftLine  int // -1 means virtual spacer
     RightLine int // -1 means virtual spacer
     Kind      ChangeKind
     Height    int // max wrapped display rows for either real line, minimum 1
+    Changes   []ChangeSpan // changed rune ranges for each real side; immutable
 }
 
 type DiffSnapshot struct {
@@ -671,6 +682,16 @@ type Viewport struct {
     RightStartCol int
 }
 ```
+
+`Changed` line pairs carry zero or more paired `ChangeSpan` ranges. Each range
+uses half-open rune offsets, so byte length and terminal display width do not
+affect comparison coordinates. A zero-length range on one side represents a
+character insertion or deletion on that side. Spans partition the differing
+regions; text between successive ranges is equal context. `Equal` rows carry no
+spans. A real line aligned to a virtual spacer carries one whole-line range on
+its real side, including an empty range for an empty source line, while the
+spacer remains textless. The comparison and viewport treat span slices as
+immutable after construction.
 
 The *canonical vertical coordinate* is the integer expanded visual-row index in
 `DiffSnapshot`, not a logical line number, not either Micro `StartLine`, and not
@@ -724,7 +745,10 @@ and cursor treatment remain predictable:
 3. Apply the character-level added/deleted style to changed text cells. It
    overrides syntax foreground and hunk background with the configured
    `diff-added` or `diff-deleted` foreground/background/attributes, with
-   documented defaults when those styles are absent.
+   documented defaults when those styles are absent. The fallback is green
+   foreground for additions and red foreground for deletions, no added text
+   attributes, and the current line-level hunk background. A configured
+   `ColorDefault` background also inherits that hunk background.
 4. Apply selection colors to selected text cells, overriding the preceding
    foreground and background. The gutter's diff marker and line-level context
    remain visible so selection does not erase all indication of a changed line.

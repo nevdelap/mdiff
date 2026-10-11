@@ -33,6 +33,23 @@ func TestExpandSharesWrapHeightAcrossPairedLines(t *testing.T) {
 	}
 }
 
+func TestExpandCarriesCharacterChangesIntoVisualRows(t *testing.T) {
+	changes := []compare.ChangeSpan{{
+		Left:  compare.RuneSpan{Start: 1, End: 2},
+		Right: compare.RuneSpan{Start: 1, End: 3},
+	}}
+	pairs := []compare.Pair{{Left: 0, Right: 0, Kind: compare.Changed, Changes: changes}}
+	layout := Expand(pairs, func(int) int { return 2 }, func(int) int { return 1 })
+	if len(layout.Rows) != 2 {
+		t.Fatalf("got %d expanded rows, want 2", len(layout.Rows))
+	}
+	for i, row := range layout.Rows {
+		if len(row.Changes) != 1 || row.Changes[0] != changes[0] {
+			t.Fatalf("visual row %d lost character spans: %#v", i, row)
+		}
+	}
+}
+
 func TestCursorRowAndLineMappingUseSharedCoordinates(t *testing.T) {
 	layout := Expand([]compare.Pair{
 		{Left: 0, Right: 0, Kind: compare.Equal},

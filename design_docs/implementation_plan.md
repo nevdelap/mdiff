@@ -258,7 +258,7 @@ Handoff:
 
 ### TASK-003 - Render character-level differences
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -330,6 +330,33 @@ Handoff:
   behavior, test coverage, and any `diffmatchpatch` limitations. TASK-004 must
   preserve the immutable character spans when moving comparison off the input
   path.
+- Implemented half-open Unicode-rune `ChangeSpan` ranges from Micro's pinned
+  `diffmatchpatch` rune operations. Changed line pairs carry paired left/right
+  spans; unpaired spacer rows carry a whole-line span on their real side, and
+  equal rows carry none. Comparison and rendering do not mutate source buffers.
+- Corrected operation counting for `DiffLinesToRunes` output to count encoded
+  line tokens as runes, with a regression test inserting a line after the token
+  table has crossed the one-byte UTF-8 range.
+- Propagated spans through the shared visual-row layout. The renderer maps
+  source runes to tcell display cells in a single pass matching Micro's tab,
+  wide-rune, word-wrap, soft-wrap, and horizontal-scroll coordinates. Combining
+  marks share their base grapheme's changed/selection style. Configured
+  `diff-added`/`diff-deleted` styles override syntax and hunk tint; missing
+  styles use green/red foreground and inherit the hunk background. Selection
+  styles take precedence over diff styles, then the focused cell receives
+  reverse cursor treatment.
+- Added comparison unit cases and a seeded fuzz property that reconstructs each
+  side from paired spans and equal context; renderer tests cover syntax/hunk
+  composition, add/delete styles, selection and cursor precedence, tabs, wide
+  and combining runes, Micro wrap-coordinate parity, and textless virtual
+  spacers. They also assert rendering leaves both buffers, cursors, selections,
+  and undo/redo stacks unchanged.
+- Verification passed: `just format`, `just lint`, `just test`, and
+  `just build`. The comparison fuzz target also passed for 5 seconds with
+  `GOMAXPROCS=2`. `just lint` required installing the repository-pinned
+  `golangci-lint` v2.14.0 via `just install-tools`; the final lint run reported
+  zero issues. The full test suite and build passed with
+  `GOCACHE=/tmp/mdiff-task3-go-cache`.
 
 ### TASK-004 - Add versioned debounced diff updates
 

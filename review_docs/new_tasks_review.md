@@ -1,16 +1,17 @@
 # New Tasks Specification Review
 
 **Reviewer:** Rufus\
-**Review pass:** 4\
+**Review pass:** 5\
 **Scope:** `TASK-003` through `TASK-010` in the implementation plan
 
 ## Decision
 
-All findings from passes 1 through 3 are addressed. The task specifications are
-ready for implementation, subject to their stated dependencies and verification
-gates.
+All findings from passes 1 through 4 are addressed. TASK-003 has since been
+implemented and independently approved; TASK-004 through TASK-010 remain ready
+for implementation subject to their stated dependencies and verification gates.
 
-No task state was changed. The implementation plan remains the source of truth.
+TASK-003 is now `COMPLETED` in the implementation plan. The plan remains the
+source of truth.
 
 ## Findings
 
@@ -149,8 +150,8 @@ and
 
 ## Task-by-task readiness
 
-- **TASK-003:** Ready. It links to the defined style-composition order and its
-  tests cover changed styles, syntax colors, selection, and cursor precedence.
+- **TASK-003:** Implemented and approved; see the independent
+  [TASK-003 review](TASK-003.md).
 - **TASK-004:** Debounce configuration, large-paste thresholds, and timer tests
   are now specified.
 - **TASK-005:** The built-in-only shortcut bar is separated from user binding
@@ -171,10 +172,12 @@ and
 Read the current implementation plan, `micro_diff_editor.md`,
 `agent_workflow.md`, `docs/roles.md`, and the existing pre-task and TASK-001/
 TASK-002 review records. `design_docs/lessons_learned.md` does not exist in the
-current workspace. This is a specification review; no implementation tests or
-quality gates were run. Pass 2 confirmed the five initial findings were
-addressed. Pass 3 confirmed the exact TASK-009 RSS fixture was specified and
-flagged a TASK-003 wording mismatch. Pass 4 confirms TASK-003 now points to the
-explicit style-composition order, resolving that mismatch. All seven recorded
+current workspace. Passes 1 through 4 were specification reviews; no
+implementation tests or quality gates were run in those passes. Pass 2 confirmed
+the five initial findings were addressed. Pass 3 confirmed the exact TASK-009
+RSS fixture was specified and flagged a TASK-003 wording mismatch. Pass 4
+confirms TASK-003 now points to the explicit style-composition order, resolving
+that mismatch. Pass 5 rechecked the remaining task specs and records the
+completed TASK-003 implementation review. All seven recorded specification
 findings are addressed. Markdownlint and the pinned `mdformat --check` on this
 review document passed after formatting.

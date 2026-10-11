@@ -1,23 +1,35 @@
 package prototype
 
 import (
+	"unicode"
+
+	runewidth "github.com/mattn/go-runewidth"
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/compare"
+	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	"github.com/nevdelap/mdiff/internal/micro/screen"
+	"github.com/nevdelap/mdiff/internal/micro/util"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
 type renderedCell struct {
-	rune  rune
-	combc []rune
-	style tcell.Style
-	width int
+	rune       rune
+	combc      []rune
+	style      tcell.Style
+	width      int
+	sourceRune int
+}
+
+type renderedLine struct {
+	rows     [][]renderedCell
+	changed  []bool
+	selected []bool
 }
 
 func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
-	cache := make(map[int][][]renderedCell)
+	cache := make(map[int]renderedLine)
 	for screenY := 0; screenY < height; screenY++ {
 		rowIndex := top + screenY
 		if rowIndex >= len(layout.Rows) {
@@ -38,15 +50,18 @@ func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 		if cell.Spacer || cell.Continuation || cell.Line < 0 {
 			continue
 		}
-		lines, ok := cache[cell.Line]
+		line, ok := cache[cell.Line]
 		if !ok {
-			lines = a.renderMicroLine(p, cell.Line)
-			cache[cell.Line] = lines
+			line.rows = a.renderMicroLine(p, cell.Line)
+			runes := []rune(p.buf.Line(cell.Line))
+			line.changed = changedRuneMask(runes, row.Changes, p.x != 0)
+			line.selected = selectionRuneMask(p, cell.Line, runes)
+			cache[cell.Line] = line
 		}
-		if cell.WrapRow < 0 || cell.WrapRow >= len(lines) {
+		if cell.WrapRow < 0 || cell.WrapRow >= len(line.rows) {
 			continue
 		}
-		copyLine(p, screenY, lines[cell.WrapRow], base, different)
+		copyLine(p, screenY, line.rows[cell.WrapRow], base, row, p.x != 0, different, a.focusedPane() == p, line.changed, line.selected)
 	}
 }
 
@@ -71,9 +86,10 @@ func (a *App) renderMicroLine(p *pane, line int) [][]renderedCell {
 		rows[row] = make([]renderedCell, p.width)
 		for col := 0; col < p.width; col++ {
 			r, combc, style, cellWidth := a.paintScreen.GetContent(col, row)
-			rows[row][col] = renderedCell{rune: r, combc: append([]rune(nil), combc...), style: style, width: cellWidth}
+			rows[row][col] = renderedCell{rune: r, combc: append([]rune(nil), combc...), style: style, width: cellWidth, sourceRune: -1}
 		}
 	}
+	annotateSourceRunes(p, line, rows)
 	screen.Screen = compositionScreen
 
 	view.X, view.Y, view.Width, view.Height = x, y, width, height
@@ -95,22 +111,253 @@ func diffStyle(kind compare.Kind, right bool) tcell.Style {
 	return config.DefStyle.Background(background)
 }
 
+func annotateSourceRunes(p *pane, line int, rows [][]renderedCell) {
+	runes := []rune(p.buf.Line(line))
+	locations := sourceRuneLocations(p, line, runes)
+	for i, r := range runes {
+		runeIndex := i
+		if isCombining(r) {
+			for runeIndex > 0 && isCombining(runes[runeIndex]) {
+				runeIndex--
+			}
+			if runeIndex == i {
+				continue
+			}
+		}
+		start := locations[runeIndex]
+		end := locations[runeIndex+1]
+		markVisualRange(rows, start, end, runeIndex, p)
+	}
+}
+
+// sourceRuneLocations mirrors Micro's width, word-wrap, and soft-wrap
+// calculation in one pass. Calling VLocFromLoc for every rune would rescan the
+// line prefix each time and make long-line rendering quadratic.
+func sourceRuneLocations(p *pane, line int, runes []rune) []display.VLoc {
+	locations := make([]display.VLoc, len(runes)+1)
+	if !p.buf.Settings["softwrap"].(bool) {
+		tabSize := util.IntOpt(p.buf.Settings["tabsize"])
+		visualX := 0
+		for i, r := range runes {
+			locations[i] = display.VLoc{SLoc: display.SLoc{Line: line}, VisualX: visualX}
+			width := runewidth.RuneWidth(r)
+			if r == '\t' {
+				width = tabSize - visualX%tabSize
+			}
+			visualX += width
+		}
+		locations[len(runes)] = display.VLoc{SLoc: display.SLoc{Line: line}, VisualX: visualX}
+		return locations
+	}
+
+	bufWidth := p.width
+	if bufWidth <= 0 {
+		return locations
+	}
+	tabSize := util.IntOpt(p.buf.Settings["tabsize"])
+	wordwrap := p.buf.Settings["wordwrap"].(bool)
+	row, visualX, totalWidth := 0, 0, 0
+	widths := make([]int, 0, min(bufWidth, 256))
+	for start := 0; start < len(runes); {
+		wordStart := start
+		widths = widths[:0]
+		wordWidth := 0
+		for start < len(runes) {
+			r := runes[start]
+			width := 0
+			if r == '\t' {
+				tabWidth := tabSize - totalWidth%tabSize
+				width = min(tabWidth, bufWidth-visualX)
+				totalWidth += tabWidth
+			} else {
+				width = runewidth.RuneWidth(r)
+				totalWidth += width
+			}
+			widths = append(widths, width)
+			wordWidth += width
+			start++
+			if wordwrap && !util.IsWhitespace(r) && start < len(runes) && wordWidth < bufWidth {
+				continue
+			}
+			break
+		}
+
+		if visualX+wordWidth > bufWidth && visualX > 0 {
+			row++
+			visualX = 0
+		}
+		for i, width := range widths {
+			locations[wordStart+i] = display.VLoc{SLoc: display.SLoc{Line: line, Row: row}, VisualX: visualX}
+			visualX += width
+		}
+		if visualX >= bufWidth {
+			row++
+			visualX = 0
+		}
+	}
+	locations[len(runes)] = display.VLoc{SLoc: display.SLoc{Line: line, Row: row}, VisualX: visualX}
+	return locations
+}
+
+func markVisualRange(rows [][]renderedCell, start, end display.VLoc, runeIndex int, p *pane) {
+	softwrap := p.buf.Settings["softwrap"].(bool)
+	startX, endX := start.VisualX, end.VisualX
+	if !softwrap {
+		startX -= p.view.StartCol
+		endX -= p.view.StartCol
+	}
+	for row := start.Row; row <= end.Row; row++ {
+		if row < 0 || row >= len(rows) {
+			continue
+		}
+		from, to := 0, p.width
+		if row == start.Row {
+			from = startX
+		}
+		if row == end.Row {
+			to = endX
+		}
+		from = max(0, from)
+		to = min(p.width, to)
+		for col := from; col < to; col++ {
+			rows[row][col].sourceRune = runeIndex
+		}
+	}
+}
+
+func changedRuneMask(runes []rune, changes []compare.ChangeSpan, right bool) []bool {
+	mask := make([]bool, len(runes))
+	for _, change := range changes {
+		span := change.Left
+		if right {
+			span = change.Right
+		}
+		start := max(0, min(len(mask), span.Start))
+		end := max(start, min(len(mask), span.End))
+		for i := start; i < end; i++ {
+			mask[i] = true
+		}
+	}
+	return expandCombiningMask(runes, mask)
+}
+
+func selectionRuneMask(p *pane, line int, runes []rune) []bool {
+	mask := make([]bool, len(runes))
+	for _, cursor := range p.buf.GetCursors() {
+		if !cursor.HasSelection() {
+			continue
+		}
+		start, end := cursor.CurSelection[0], cursor.CurSelection[1]
+		if start.GreaterThan(end) {
+			start, end = end, start
+		}
+		for i := range runes {
+			loc := buffer.Loc{X: i, Y: line}
+			if loc.GreaterEqual(start) && loc.LessThan(end) {
+				mask[i] = true
+			}
+		}
+	}
+	return expandCombiningMask(runes, mask)
+}
+
+func expandCombiningMask(runes []rune, mask []bool) []bool {
+	for i, marked := range mask {
+		if !marked || !isCombining(runes[i]) {
+			continue
+		}
+		base := i - 1
+		for base >= 0 && isCombining(runes[base]) {
+			base--
+		}
+		if base >= 0 {
+			mask[base] = true
+		}
+	}
+	return mask
+}
+
+func isCombining(r rune) bool {
+	return unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Mc, r) || unicode.Is(unicode.Me, r)
+}
+
 func clearRow(p *pane, screenY int, style tcell.Style) {
 	for x := 0; x < p.width; x++ {
 		screen.SetContent(p.x+x, screenY, ' ', nil, style)
 	}
 }
 
-func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, different bool) {
-	_, rowBackground, _ := rowStyle.Decompose()
+func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, row viewport.Row, right, different, focused bool, changed, selected []bool) {
+	cursor := p.h.Cursor.Loc
 	for x, cell := range cells {
 		if cell.width == 0 {
 			continue
 		}
-		style := cell.style
+		style := baseCellStyle(cell.style, rowStyle)
 		if different {
-			style = style.Background(rowBackground)
+			_, background, _ := rowStyle.Decompose()
+			style = style.Background(background)
+		}
+		if different && cell.sourceRune >= 0 && cell.sourceRune < len(changed) && changed[cell.sourceRune] {
+			style = characterDiffStyle(rowStyle, right)
+		}
+		if cell.sourceRune >= 0 && cell.sourceRune < len(selected) && selected[cell.sourceRune] {
+			style = selectionStyle()
+		}
+		if focused && !p.h.Cursor.HasSelection() && cursor.Y == rowCell(row, right).Line && cell.sourceRune == cursor.X {
+			style = style.Reverse(true)
 		}
 		screen.SetContent(p.x+x, screenY, cell.rune, cell.combc, style)
 	}
+}
+
+func rowCell(row viewport.Row, right bool) viewport.Cell {
+	if right {
+		return row.Right
+	}
+	return row.Left
+}
+
+func baseCellStyle(syntax, row tcell.Style) tcell.Style {
+	fg, _, attrs := syntax.Decompose()
+	_, bg, _ := row.Decompose()
+	return applyAttributes(tcell.StyleDefault.Foreground(fg).Background(bg), attrs)
+}
+
+func characterDiffStyle(row tcell.Style, right bool) tcell.Style {
+	name, fallback := "diff-deleted", tcell.ColorRed
+	if right {
+		name, fallback = "diff-added", tcell.ColorGreen
+	}
+	style, ok := config.Colorscheme[name]
+	if !ok {
+		style = tcell.StyleDefault.Foreground(fallback)
+	}
+	fg, bg, attrs := style.Decompose()
+	if fg == tcell.ColorDefault {
+		fg = fallback
+	}
+	if bg == tcell.ColorDefault {
+		_, bg, _ = row.Decompose()
+	}
+	return applyAttributes(tcell.StyleDefault.Foreground(fg).Background(bg), attrs)
+}
+
+func selectionStyle() tcell.Style {
+	if style, ok := config.Colorscheme["selection"]; ok {
+		return style
+	}
+	return config.DefStyle.Reverse(true)
+}
+
+func applyAttributes(style tcell.Style, attrs tcell.AttrMask) tcell.Style {
+	style = style.Normal()
+	style = style.Bold(attrs&tcell.AttrBold != 0)
+	style = style.Blink(attrs&tcell.AttrBlink != 0)
+	style = style.Reverse(attrs&tcell.AttrReverse != 0)
+	style = style.Underline(attrs&tcell.AttrUnderline != 0)
+	style = style.Dim(attrs&tcell.AttrDim != 0)
+	style = style.Italic(attrs&tcell.AttrItalic != 0)
+	style = style.StrikeThrough(attrs&tcell.AttrStrikeThrough != 0)
+	return style
 }
