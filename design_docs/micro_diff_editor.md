@@ -495,7 +495,8 @@ dependency container for config, open buffers, screen, and plugin state.
    rules without presenting a disk path. Initialize a normal Micro `BufPane`
    around each.
 5. Set both panes' vertical view adapter to the shared viewport controller.
-   Configure a two-column layout and a status bar with focus and diff state.
+   Configure a two-column layout, a status area with focus and diff state, and a
+   Micro-style shortcut bar at the bottom edge.
 6. Render, route terminal events, apply edits through Micro actions, schedule
    comparison after content changes, and install only results whose versions
    match both current buffers.
@@ -561,6 +562,35 @@ persistent warning that plugin code can write buffer contents or other files.
 Never describe plugins as sandboxed. A future restricted plugin mode requires a
 separate design and security audit.
 
+### Bottom shortcut bar
+
+Use Micro's compact bottom key-hint treatment and its configured color scheme
+for the shortcut bar. Keep it visually distinct from the diff/status area and
+the two text panes. The initial supported hints are `^Q Quit`, `^G Help`,
+`^E Command Bar`, `^K Cut Line`, `^F Find`, `^Z Undo`, `^Y Redo`,
+`^A Select All`, and `^D Duplicate Line`. A hint is shown only when that action
+is available and the displayed key sequence matches the effective binding; if a
+user remaps a listed action, render the effective binding or omit the hint when
+it cannot be represented compactly. mdiff-owned reserved bindings take
+precedence over conflicting Micro bindings and must be reflected accurately.
+
+Do not advertise `^S Save`, `^O Open`, or `^T New`. mdiff has exactly two
+in-memory panes and intentionally has no file open, save, Save As, or new-buffer
+operation. Their absence from the bar must agree with the action filter and
+command bar so the interface never implies document persistence.
+
+The bar is a single terminal row and must not wrap over editor cells. At narrow
+widths, omit lower-priority hints in a deterministic order while retaining
+`^Q Quit` whenever the terminal can render it; show no partial label. The status
+area may expose focus and diff freshness separately. Initially, before TASK-006
+configuration loading, hints use the pinned Micro built-in bindings. After
+TASK-006 they use the effective user-configured binding, with mdiff reserved
+actions taking precedence. Pane resize/layout code must reserve both rows before
+calculating pane widths/heights, and the real terminal cursor must remain in a
+pane rather than being placed on either bar. Simulation-screen tests should
+cover the full hint set, remapped/missing bindings, disabled actions, and
+progressively narrow widths.
+
 ### Diff computation
 
 Use `diffmatchpatch` from the Micro dependency already in its `go.mod`. Encode
@@ -586,14 +616,20 @@ cursor positions, enters undo, or gets included in snapshots. Provide
 next/previous-difference navigation from the changed block index, with wrap
 policy documented in the UI.
 
-On mutation, wait a short configurable debounce (proposal: 80 ms, bounded to
+On mutation, wait a short configurable debounce (80 ms by default, bounded to
 40–180 ms), cancel a queued older job when possible, capture immutable snapshots
-plus versions, and run at most one comparison at a time. On completion, discard
-a result if either version has changed. If a newer change arrived during
+plus versions, and run at most one comparison at a time. Configure it with
+`--diff-debounce=MS` or the `diff-debounce-ms` value in the mdiff-namespaced
+settings file; the command-line value wins, and invalid values are rejected
+before raw terminal mode. Start or restart the timer after each text mutation.
+For an individual paste event containing at least 256 KiB of inserted UTF-8 text
+or at least 10,000 inserted newline characters, set that batch's delay to
+`min(configured delay + 20 ms, 200 ms)`; smaller pastes use the configured
+delay. Navigation and non-text events do not restart the timer. On completion,
+discard a result if either version has changed. If a newer change arrived during
 computation, immediately schedule the newest snapshot. Render the last valid
 diff during computation, mark it stale in the status bar, and avoid flashing all
-lines as changed. A large-paste threshold may lengthen the debounce up to 200
-ms; it must not delay initial feedback indefinitely.
+lines as changed.
 
 Initially recompute the full line diff. This is simpler and less error-prone
 than incremental Myers edit maintenance. The engine interface should allow
@@ -674,6 +710,35 @@ lines. Line-level background may identify a changed hunk, while character-level
 additions and deletions show the actual changed text. This remains required
 follow-up work beyond the initial TASK-002 prototype. The character spans affect
 rendering only; they never alter either Micro buffer.
+
+### Cell style composition
+
+Compose each rendered cell in this fixed order so syntax, diff marks, selection,
+and cursor treatment remain predictable:
+
+1. Start with the pane's normal background and syntax foreground/attributes.
+   Syntax background colors are ignored in editor text cells so they cannot
+   erase diff or selection context; syntax foreground and attributes remain.
+2. Apply the line-level hunk background tint while retaining syntax foreground.
+   Added/deleted spacer rows use their side's full diff background style.
+3. Apply the character-level added/deleted style to changed text cells. It
+   overrides syntax foreground and hunk background with the configured
+   `diff-added` or `diff-deleted` foreground/background/attributes, with
+   documented defaults when those styles are absent.
+4. Apply selection colors to selected text cells, overriding the preceding
+   foreground and background. The gutter's diff marker and line-level context
+   remain visible so selection does not erase all indication of a changed line.
+5. Apply the focused terminal cursor treatment last to its cell only. The
+   cursor's final style overrides selection and diff colors for that cell; the
+   cursor remains at the real buffer coordinate and is never drawn on a spacer.
+
+Thus the order from lowest to highest precedence is syntax/base, line hunk,
+character diff, selection, cursor. If a terminal cannot express the configured
+foreground/background/attribute combination, drop attributes in this order:
+italic, underline, then bold, while preserving the highest-priority available
+foreground/background. Tests must assert a selected changed span uses selection
+colors and the focused cursor on a changed cell uses cursor treatment, while the
+diff gutter remains informative.
 
 ### Shared viewport, cursor movement, and scroll anchoring
 
@@ -851,8 +916,10 @@ guaranteed; this is an operating-system limit.
 
 ## Performance and memory targets
 
-Targets are proposals to validate on a documented reference machine and
-terminal:
+Use Ubuntu 24.04 Linux/amd64 with 4 vCPUs and 8 GiB RAM as the reference
+profile; record the exact Go 1.26.x patch release, CPU model, and
+terminal/emulator used in each report. These are measurable regression gates for
+that profile:
 
 - Small input up to 10,000 lines: settled diff update within 100 ms after the
   debounce on typical edits.
@@ -861,6 +928,12 @@ terminal:
   large replacement.
 - 1 MiB paste: UI should begin rendering the accepted text within 250 ms; diff
   may remain marked stale while the worker runs.
+- For adversarial comparison cases, return a completed diff or install a coarse
+  changed-region fallback within 2 s of worker start. The fallback keeps the
+  previous valid map where possible, identifies the unresolved range as changed,
+  and displays a warning; it must not leave a stuck worker retaining snapshots.
+- Peak process RSS for `rss-10mib-100k-balanced-near-equal-v1` must not exceed
+  512 MiB on the reference profile.
 - No unbounded queue of snapshots or compare jobs; at most one active and one
   latest pending request.
 - Alignment metadata should be `O(N+M)`; line snapshots should avoid repeated
@@ -870,14 +943,30 @@ terminal:
   all lines. Width/height map rebuild may be `O(N+M)` initially; measure before
   adding a tree structure.
 
-Line diff normally scales with input plus edit distance using Myers-style
-matching; worst-case behavior can be quadratic in total line count. The chosen
-`go-diff` implementation has timeout/algorithm settings that must be configured
-and measured for line-token inputs. A timeout must produce a usable coarse
-fallback (for example, mark the affected region as changed and show a status
-warning) rather than freezing the UI. Benchmark repeated lines, all-different
-input, a single-line edit, and very long lines. Do not run syntax highlighting
-or diff computation synchronously in terminal input handling for a large paste.
+Use fixed adversarial benchmark inputs: 100,000 `repeat` lines versus a 50,000
+line prefix, one `changed` line, and a 50,000 line suffix; 50,000 unique
+`L%08d:%016x` records whose hex value is the next `Uint64` from Go
+`math/rand.NewSource(20261011)`, compared against the reverse order; and a
+single 1 MiB ASCII line with its middle byte changed. Record exact input
+byte/line counts and generator version. The RSS gate uses
+`rss-10mib-100k-balanced-near-equal-v1`: each side has 50,000 LF-terminated
+ASCII lines. In each side, lines 0–42,879 have 104 payload bytes and lines
+42,880–49,999 have 103 payload bytes, for exactly 5 MiB per side including LF.
+Each payload starts with `L%05d:` for its zero-based line index and fills the
+remaining bytes with `byte('a' + (lineIndex+payloadOffset)%26)`, where
+`payloadOffset` starts at zero after the prefix. The right side starts as an
+exact copy, then changes the first payload byte after the prefix to the next
+lowercase letter (wrapping `z` to `a`) on lines divisible by 1,000. This
+produces 50 one-byte changed lines with no insertions or deletions and
+10,485,760 total bytes. Line diff normally scales with input plus edit distance
+using Myers-style matching; worst-case behavior can be quadratic in total line
+count. The chosen `go-diff` implementation has timeout/algorithm settings that
+must be configured and measured for line-token inputs. A timeout must produce a
+usable coarse fallback (for example, mark the affected region as changed and
+show a status warning) rather than freezing the UI. Benchmark repeated lines,
+all-different input, a single-line edit, and very long lines. Do not run syntax
+highlighting or diff computation synchronously in terminal input handling for a
+large paste.
 
 ## Testing strategy
 
@@ -997,36 +1086,37 @@ shared-row architecture without replacing most of `BufWindow`. The remaining
 phases extend this proof with versioned diffing, character-span rendering,
 broader configuration compatibility, performance work, and release readiness.
 
-### Phase 2: Buffer lifecycle and editor action preservation
+### Phase 2: Character diff and responsive comparison (TASK-003–TASK-004)
 
-Implement `BTTransient`, mutation version events, two independent undo
-histories, Micro action dispatch, focus switching, paste, editing, indentation,
-cursor/selection, and safe shutdown. Disable all built-in file operations.
-**Exit gate:** integration tests prove ordinary editing, undo/redo, and no
-content persistence.
+Add rune-based changed spans for paired replacement lines, then move immutable
+line/character comparison to a debounced, versioned worker. **Exit gate:**
+rendering and property tests prove span correctness; deterministic coordinator
+tests prove stale results cannot replace current content and input handling
+stays responsive.
 
-### Phase 3: Config, syntax, and plugin compatibility
+### Phase 3: Editing and configuration compatibility (TASK-005–TASK-007)
 
-Load Micro settings, bindings, color schemes, syntax definitions, and plugin
-hooks under the selected policy. Add safe action filtering, compatibility
-diagnostics, and `--enable-plugins` opt-in with a persistent trust warning.
-**Exit gate:** fixture tests and at least representative real user config/plugin
-smoke tests; publish the support matrix.
+Complete supported Micro editing actions, load user settings/keybindings/
+colors/syntax without writing config, and separately implement the documented
+trusted-plugin opt-in. **Exit gate:** fixture and integration tests cover the
+compatibility matrix, default-mode no-write behavior, rejected actions, and
+plugin trust warning.
 
-### Phase 4: Diff, viewport, wrapping, and performance hardening
+### Phase 4: Shared viewport and performance hardening (TASK-008–TASK-009)
 
-Replace prototype diff with versioned debounced worker; implement anchors,
-navigation, wrap-height map, resize cache invalidation, large-paste behavior,
-timeout fallback, and benchmarks. **Exit gate:** performance targets met or
-revised with measured evidence; property/fuzz tests and multi-platform PTY suite
-pass.
+Harden cursor, focus, scrolling, diff navigation, click mapping, wrapping,
+resize anchoring, and horizontal clipping against asynchronous diff updates.
+Benchmark large pastes and adversarial inputs, then implement bounded fallback
+and measured cache improvements. **Exit gate:** property/fuzz and Linux/macOS
+terminal tests pass, with the documented performance targets met or revised
+using measured evidence.
 
-### Phase 5: Project quality and release readiness
+### Phase 5: Release readiness (TASK-010)
 
-Finalize Just recipes, `docs/development.md`, CI, dependency audits, licenses,
-upstream sync notes, diagnostics, and distribution packaging. **Exit gate:**
-clean full `just check`, Linux/macOS PTY acceptance, reproducible release build,
-and documented Micro update process.
+Finalize user documentation, CLI behavior, license and upstream refresh
+verification, dependency audit, and Linux/macOS release CI. **Exit gate:** a
+clean `just check`, reproducible release build, passing supported PTY checks,
+and an accurate compatibility and limitation statement.
 
 ## Risks and mitigations
 

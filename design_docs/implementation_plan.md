@@ -2,9 +2,10 @@
 
 This file is the source of truth for implementation task scope, dependencies,
 acceptance criteria, and state. The architecture and proposed phases are
-described in [`micro_diff_editor.md`](micro_diff_editor.md). The first two tasks
-establish a pinned Micro integration baseline, then validate the diff-aware
-scroll architecture before full application implementation.
+described in [`micro_diff_editor.md`](micro_diff_editor.md). TASK-001 pins and
+audits Micro integration; TASK-002 validates the shared-scroll prototype.
+TASK-003 through TASK-010 specify the remaining product implementation and
+release work.
 
 ## Tasks
 
@@ -254,3 +255,659 @@ Handoff:
   `just build` passed. `go run -buildvcs=false ./cmd/mdiff --version` printed
   the pinned prototype version. macOS verification is delegated to the existing
   CI matrix and has not been run locally.
+
+### TASK-003 - Render character-level differences
+
+State: NEW
+
+Goal:
+
+- Extend line-level comparison so replacement rows show the differing characters
+  within each line, while preserving the shared line alignment and leaving both
+  Micro buffers unchanged.
+
+Dependencies:
+
+- TASK-002 is `COMPLETED` and its shared-row architecture is approved.
+- Use the existing `github.com/sergi/go-diff/diffmatchpatch` dependency pinned
+  through Micro; do not add another diff dependency without measured evidence.
+
+Scope:
+
+- Work primarily in `internal/compare` for rune diff operations and span types,
+  and `internal/prototype/render.go` for display-cell mapping and styling.
+  Extend `internal/viewport` row data only if the immutable render model
+  requires it.
+- Add immutable per-side change spans to paired `Changed` rows. Define spans in
+  Unicode rune offsets, with explicit conversion to Micro display columns for
+  rendering tabs, wide runes, and combining marks. Expand styling to a complete
+  terminal cell when a rune occupies multiple cells or a combining sequence.
+- Compute intraline operations for paired replacement lines. A line paired
+  against a virtual spacer is wholly added or deleted; equal rows receive no
+  character change spans. Keep line operation classification and row order
+  unchanged.
+- Render distinct added and deleted character styles using configured diff
+  styles and the explicit cell-style composition order in
+  [`micro_diff_editor.md`](micro_diff_editor.md#cell-style-composition). Missing
+  diff styles must use documented defaults.
+- Keep comparison outputs immutable and independent of live Micro buffers.
+
+Out of scope:
+
+- Debouncing, workers, incremental comparison, large-input tuning, and viewport
+  redesign; those are specified in later tasks.
+- Editing either buffer, inserting markers into buffer text, or changing Micro
+  undo state to represent diff spans.
+
+Acceptance criteria:
+
+- Unit tests cover identical lines, one insertion, one deletion, multiple
+  disjoint edits, empty lines, replacement pairs, and wholly added/deleted
+  lines. Equal text yields no intraline spans.
+- Unicode tests cover non-ASCII runes, wide terminal characters, combining
+  marks, and tabs. Span-to-cell conversion neither omits changed visible cells
+  nor styles a partial wide character.
+- Renderer tests show added/deleted character styles on the correct side while
+  retaining line-level hunk context, syntax colors, selections, and the visible
+  cursor. Include a selected changed span and a focused cursor on a changed cell
+  to verify precedence. Virtual spacer rows remain blank and do not receive
+  fabricated text.
+- Property tests verify spans reconstruct each paired source line when applied
+  with equal spans and side-specific insert/delete spans. Neither buffer text,
+  cursor, selection, undo, nor redo state changes during comparison/rendering.
+- `just format`, `just lint`, `just test`, and `just build` pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just build`
+
+Handoff:
+
+- Record the span coordinate convention, style precedence, Unicode display-cell
+  behavior, test coverage, and any `diffmatchpatch` limitations. TASK-004 must
+  preserve the immutable character spans when moving comparison off the input
+  path.
+
+### TASK-004 - Add versioned debounced diff updates
+
+State: NEW
+
+Goal:
+
+- Move full-buffer line and character comparison off the terminal input path and
+  install only results that match the current left and right buffer versions.
+
+Dependencies:
+
+- TASK-003 is `COMPLETED`, with immutable line and character diff output.
+- Use Micro's pinned buffer mutation/event boundary and the shared-row model
+  validated by TASK-002.
+
+Scope:
+
+- Add the coordinator and deterministic test seams under `internal/prototype`,
+  with mutation-version notifications at `internal/micro/buffer` and immutable
+  comparison inputs/outputs in `internal/compare`.
+- Track a monotonic content version for each buffer. Emit a coalescible change
+  notification for typing, paste, undo, redo, deletion, and any supported
+  command that mutates text. Do not rely on cursor movement or a render-frame
+  dirty flag as a change signal.
+- Capture immutable snapshots on the application goroutine. Workers must never
+  read live Micro buffers. Read `diff-debounce-ms` from the mdiff-namespaced
+  settings file or `--diff-debounce` CLI option (CLI wins); default to 80 ms and
+  accept configured values only from 40 through 180 ms. Start/restart the timer
+  after every coalesced text mutation, so the delay is measured from the most
+  recent mutation. For a paste event of at least 256 KiB of inserted UTF-8 text
+  or at least 10,000 inserted newline characters, use
+  `min(configuredDelay+20 ms, 200 ms)` for that pending batch. Smaller pastes
+  use the configured delay. Navigation and non-text events do not restart it.
+- Permit at most one active comparison and one newest pending snapshot pair.
+  Cancel superseded work when supported, discard stale version pairs, and
+  immediately schedule the latest pair after an obsolete job completes.
+- Keep the last valid map on screen and indicate that it is stale while a new
+  comparison is pending. Install a result, remap the viewport anchor, and redraw
+  both panes as one event-loop operation.
+- On shutdown, stop timers, prevent new submissions, and join or cancel workers.
+  Surface comparison errors without corrupting the last valid map.
+
+Out of scope:
+
+- Incremental diff algorithms, Fenwick trees, and changing the pinned diff
+  library. Optimize only after TASK-009 benchmarks justify it.
+- Changes to plugin policy or Micro configuration compatibility.
+
+Acceptance criteria:
+
+- Deterministic unit tests with an injected clock and worker prove debounce
+  bounds, coalescing, one-active/one-pending limits, stale-result rejection,
+  correct version pairing, latest-result installation, error handling, and
+  shutdown without leaked goroutines. Cover 40 ms, default 80 ms, 180 ms, paste
+  threshold boundaries, the 200 ms cap, and repeated edits resetting the timer.
+- Mutation tests prove every supported text-changing path advances only the
+  owning buffer's version, including undo, redo, and bracketed paste. Navigation
+  without edits does not advance versions.
+- Integration tests paste and edit a large fixture while input remains
+  responsive, show a stale indicator during work, and converge to an alignment
+  matching the final snapshots.
+- No worker accesses a live Micro buffer; race-enabled tests pass for the
+  coordinator and its test doubles.
+- `just format`, `just lint`, `just test`, `just test-race`, and `just build`
+  pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-race`
+- `just build`
+
+Handoff:
+
+- Record debounce measurements, shutdown behavior, queue bounds, and any
+  cancellation limitation. Include a trace or test proving that an obsolete
+  result cannot replace a newer alignment.
+
+### TASK-005 - Complete Micro editing behavior
+
+State: NEW
+
+Goal:
+
+- Validate and complete ordinary Micro editing behavior in both transient panes,
+  without exposing file persistence or actions that leave the two-pane
+  application.
+
+Dependencies:
+
+- TASK-002 is `COMPLETED`.
+- TASK-004 is `COMPLETED` so every supported edit can publish the required
+  mutation/version notification.
+- Micro action dispatch and buffer APIs remain pinned to the audited revision.
+
+Scope:
+
+- Work in `internal/prototype` and the required pinned packages under
+  `internal/micro/action` and `internal/micro/buffer`; preserve vendored notices
+  and keep changes inside mdiff's module.
+- Exercise and repair supported Micro actions for cursor movement, selections,
+  cut/copy/paste, indentation and unindentation, autocomplete where usable,
+  undo/redo, search within the current in-memory buffer, and ordinary text
+  editing. Preserve independent cursor, selection, and undo history per pane.
+- Ensure all edits pass through the mutation/version hook from TASK-004 without
+  splitting paste or compound edits into surprising undo groups.
+- Keep file arguments, open/save/save-as/reload, shell, suspend, and external
+  command actions unavailable. A rejected configured action must produce a
+  concise user-visible explanation without changing either buffer.
+- Add a compact, Micro-style shortcut bar at the bottom of the terminal. Show
+  `^Q Quit`, `^G Help`, `^E Command Bar`, `^K Cut Line`, `^F Find`, `^Z Undo`,
+  `^Y Redo`, `^A Select All`, and `^D Duplicate Line` when each action is
+  available in the current context using the built-in bindings available before
+  user configuration is loaded. Do not advertise an action whose built-in
+  binding is absent, intercepted, or unavailable. TASK-006 owns user binding
+  remaps and must update these labels from the effective configured bindings.
+- Do not show `^S Save`, `^O Open`, or `^T New`: persistent file operations and
+  creating additional buffers are outside the memory-only, exactly-two-pane
+  product contract. Never add a path prompt that implies persistence is
+  supported.
+- Define responsive behavior for narrow terminals: prioritize the quit and
+  essential editing/help actions, omit lower-priority hints before allowing
+  labels to collide or wrap into pane content, and keep status/cursor rendering
+  distinct from the shortcut bar.
+
+Out of scope:
+
+- Full Micro plugin compatibility, which has a separate explicit opt-in task.
+- Redesigning diff algorithms or the shared vertical coordinate.
+
+Acceptance criteria:
+
+- Simulation-screen integration tests run supported built-in editing actions in
+  each pane and prove that edits, selection, undo, redo, and search state do not
+  leak to the other buffer. User-configured binding behavior is tested in
+  TASK-006 after config loading is implemented.
+- Tests cover built-in ordinary editing actions and confirm unsafe actions fail
+  clearly without writing files, changing buffer names, or terminating the
+  application.
+- Simulation-screen tests verify the Micro-style bottom shortcut bar, labels and
+  built-in bindings, omission of Save/Open/New, and graceful clipping or
+  prioritization at narrow terminal widths without overlap with pane content,
+  status, or the visible cursor.
+- Bracketed paste preserves exact text and newline semantics, remains one
+  coherent undo operation where Micro supports it, and updates the diff after
+  the mutation version changes.
+- The terminal cursor remains in the focused pane after movement, selection,
+  undo/redo, and focus changes. Normal exit and SIGINT after edits leave the
+  configured directory free of buffer, backup, and recovery state.
+- `just format`, `just lint`, `just test`, `just test-pty`, and `just build`
+  pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-pty`
+- `just build`
+
+Handoff:
+
+- List supported and rejected actions, key sequences reserved by mdiff, and any
+  Micro behavior that cannot be preserved. Update the compatibility matrix only
+  with behavior covered by tests.
+
+### TASK-006 - Load Micro configuration safely
+
+State: NEW
+
+Goal:
+
+- Respect the user's existing Micro settings, keybindings, colorschemes, and
+  syntax definitions wherever they apply to two transient buffers, while
+  preserving mdiff's no-write behavior and explicit unsupported-action policy.
+
+Dependencies:
+
+- TASK-005 is `COMPLETED` so safe editing actions and action filtering are
+  defined.
+- Use the configuration path and read-only initialization patches recorded in
+  [`micro_integration_prototype.md`](micro_integration_prototype.md).
+
+Scope:
+
+- Work in `internal/micro/config`, `internal/micro/runtime`, and
+  `internal/prototype`; update the user-facing support table in
+  `design_docs/micro_diff_editor.md` and concise usage documentation.
+- Load the standard Micro configuration directory and formats without creating
+  defaults or rewriting user files. Define precedence among Micro settings,
+  mdiff-specific flags, and any mdiff-namespaced settings file.
+- Apply supported buffer, rendering, mouse, paste, indentation, and color
+  settings to both panes. Honor a synthetic filetype override and Micro syntax
+  definitions without opening a file.
+- Load supported `bindings.json` actions while reserving mdiff focus, quit, and
+  diff-navigation controls. Reject unsafe or unavailable actions with actionable
+  diagnostics.
+- Resolve shortcut-bar labels from the effective post-configuration bindings;
+  cover remapped, removed, reserved, and unavailable actions. This completes the
+  built-in-only shortcut hints introduced in TASK-005 without moving the
+  configuration dependency earlier.
+- Resolve configured colorschemes and document fallback behavior for
+  mdiff-specific diff styles missing from a user's scheme.
+- Update the compatibility matrix and usage documentation with observed behavior
+  rather than blanket claims of full Micro compatibility.
+
+Out of scope:
+
+- Loading or running Lua plugins; see TASK-007.
+- Writing Micro defaults, mdiff settings, or buffer state to the user's config
+  directory.
+
+Acceptance criteria:
+
+- Fixture-based tests cover absent, valid, and malformed settings, bindings,
+  colorscheme, and syntax files. Valid user files remain byte-for-byte unchanged
+  after startup, edits, and shutdown.
+- Tests prove supported settings and keybindings affect both panes and reserved
+  or unsafe actions cannot save/open files, invoke shell commands, or escape
+  mdiff's lifecycle.
+- Tests verify `--diff-debounce` overrides `diff-debounce-ms` from the
+  mdiff-namespaced settings file and that invalid values are rejected before
+  terminal raw mode.
+- Shortcut-bar tests prove labels follow user remaps, omit removed or reserved
+  actions, and never advertise Save, Open, or New.
+- Syntax highlighting works for explicitly identified synthetic buffer types
+  without filesystem detection. Missing/invalid schemes produce the documented
+  fallback or actionable error without losing terminal restoration.
+- A compatibility matrix labels each tested feature as supported, partial, or
+  unsupported and names the reason for each limitation.
+- `just format`, `just lint`, `just test`, `just test-pty`, and `just build`
+  pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-pty`
+- `just build`
+
+Handoff:
+
+- Record configuration search paths, precedence, read-only guarantees, fixture
+  coverage, supported settings/actions, and explicit syntax/color/keybinding
+  limitations.
+
+### TASK-007 - Define and implement opt-in plugin compatibility
+
+State: NEW
+
+Goal:
+
+- Keep plugins disabled by default and implement only a clearly documented,
+  tested compatible subset behind the existing `--enable-plugins` policy.
+
+Dependencies:
+
+- TASK-006 is `COMPLETED` and ordinary config loading/action filtering is
+  covered.
+- Plugin behavior must remain consistent with the no-write guarantee and trust
+  warning documented in [`micro_diff_editor.md`](micro_diff_editor.md).
+
+Scope:
+
+- Work in `cmd/mdiff`, `internal/micro/config`, `internal/prototype`, and the
+  compatibility documentation; make no changes to the upstream Micro checkout.
+- Verify CLI parsing and startup policy: installed plugins are not loaded unless
+  the user explicitly supplies `--enable-plugins` for that launch.
+- When enabled, initialize only the compatible Micro Lua/plugin lifecycle and
+  expose the two transient buffers through documented hooks. Display a
+  persistent warning that plugin code is trusted and can write files or launch
+  processes.
+- Filter or reject plugin actions that cannot be represented safely with two
+  panes, transient buffers, or a shared viewport. Do not claim sandboxing.
+- Select a small representative plugin set and document incompatibility
+  categories including file-backed assumptions, tabs/splits, shell/file writes,
+  and independent scroll state.
+- Keep plugin exceptions outside the application's built-in no-write guarantee.
+  No silent activation from Micro's installed plugin list or config.
+
+Out of scope:
+
+- A sandbox, capability security model, or guarantee that enabled plugins cannot
+  write buffer contents or other files.
+- Compatibility with every plugin in Micro's ecosystem.
+
+Acceptance criteria:
+
+- Tests prove that a plugin present in the user's Micro config does not load by
+  default and that the persistent warning appears whenever opt-in mode is
+  active.
+- A compatible test plugin can observe and edit the intended transient pane
+  through supported hooks; its changes advance the correct version and update
+  the diff.
+- Incompatible plugin commands are rejected or clearly documented. A test plugin
+  fixture demonstrates that opt-in plugin effects are trusted and may write,
+  without weakening the no-write tests for the default mode.
+- Documentation states the exact trust boundary and tested compatibility set; it
+  never calls plugins sandboxed or implies enabled mode is no-write.
+- `just format`, `just lint`, `just test`, `just test-pty`, and `just build`
+  pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-pty`
+- `just build`
+
+Handoff:
+
+- Record plugins tested, hooks supported, warning behavior, unsafe-action
+  filtering, and the explicit effects excluded from the built-in no-write
+  guarantee. Identify representative fixtures by category: a compatible
+  transient-buffer edit/observer plugin, a plugin requiring a file-backed
+  buffer, one requiring tabs or splits, one changing independent scroll state,
+  and one attempting shell or filesystem writes.
+
+### TASK-008 - Harden shared viewport and terminal interaction
+
+State: NEW
+
+Goal:
+
+- Make cursor movement, scrolling, diff navigation, mouse input, wrapping,
+  horizontal scrolling, and resize stable against the final diff/layout model.
+
+Dependencies:
+
+- TASK-003 and TASK-004 are `COMPLETED` so line and character diffs are
+  versioned and installed atomically.
+- TASK-005 is `COMPLETED` so supported editing actions and cursor behavior are
+  stable.
+- TASK-006 is `COMPLETED` so configured wrapping, pane, and mouse settings are
+  known.
+
+Scope:
+
+- Work in `internal/viewport` and `internal/prototype`, including simulation and
+  PTY tests; run supported terminal interaction checks on Linux and macOS CI.
+- Keep one authoritative expanded visual-row offset that includes unmatched line
+  spacers and unequal wrap continuation rows. Route wheel and keyboard scrolling
+  from either pane to that offset; keep horizontal offsets pane-local.
+- Complete next/previous difference navigation, click-to-focus and click-to-
+  cursor mapping, deterministic clicks on virtual spacers, and cursor visibility
+  after all edit/navigation/resize paths.
+- Preserve top-row/subrow context through diff replacement, hunk removal,
+  changed-line edits, terminal resize, gutter changes, and wrap option changes.
+- Define deterministic behavior for softwrap on/off, narrow panes, terminal
+  sizes below the preferred minimum, horizontal clipping, and cursor movement to
+  a spacer counterpart.
+- Add property-based tests for logical-to-visual mapping and interaction tests
+  for repeated/ambiguous lines. Keep renderer updates atomic across both panes.
+
+Out of scope:
+
+- Incremental height data structures unless TASK-009 measurements require them.
+- Animated diff transitions or independent pane vertical scrolling.
+
+Acceptance criteria:
+
+- For generated alignments and wrap heights, every real logical line maps to
+  exactly one aligned record; logical line/subrow and visual row conversions are
+  inverse where defined; both panes use the same visual coordinate.
+- Simulation tests cover cursor movement and selections through insertions,
+  deletions, replacements, spacer clicks, both scroll directions from both
+  panes, diff jumps, softwrap on/off, unequal widths, and repeated-line anchor
+  ambiguity.
+- Resize and edits above/at/below the viewport preserve the specified anchor,
+  keep the focused cursor visible, and produce no paired-line drift or one-frame
+  mismatch between panes.
+- PTY tests exercise focus, keyboard scrolling, resize, mouse wheel when
+  supported, normal quit, interrupt, and terminal-mode restoration. Unsupported
+  terminal protocols use an explicit fallback.
+- `just format`, `just lint`, `just test`, `just test-pty`, and `just build`
+  pass on Linux; supported simulation/build tests pass on macOS CI.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-pty`
+- `just build`
+
+Handoff:
+
+- Record the final scroll/cursor rules, property generators and seeds, tested
+  terminal capabilities, and any behavior that remains terminal-dependent.
+
+### TASK-009 - Meet large-input performance and resource targets
+
+State: NEW
+
+Goal:
+
+- Validate the proposed large-input latency and memory targets, then optimize
+  only measured bottlenecks while keeping input responsive and comparison
+  resource use bounded.
+
+Dependencies:
+
+- TASK-004 is `COMPLETED` with bounded debounced comparison.
+- TASK-008 is `COMPLETED` with final rendering and visual-height behavior.
+
+Scope:
+
+- Add Go benchmarks alongside `internal/compare`, `internal/viewport`, and
+  `internal/prototype` workloads, and expose them through `justfile`.
+- Add reproducible Go benchmarks for 10,000 lines, 100,000 lines / 10 MiB, 1 MiB
+  paste, near-equal single-line changes, large replacements, repeated lines,
+  all-different input, long lines, and unequal wrap widths. Pin adversarial
+  fixtures: (a) 100,000 copies of `repeat` versus 50,000 copies, one `changed`
+  line, then 50,000 copies; (b) 50,000 unique fixed-width `L%08d:%016x` lines
+  where the hex value is the next `Uint64` from Go
+  `math/rand.NewSource(20261011)`, compared with the same generated records in
+  reverse order; and (c) one 1 MiB ASCII line with a single middle-byte change.
+  Record generator version and exact byte/line counts in benchmark output.
+- Define the RSS fixture `rss-10mib-100k-balanced-near-equal-v1` exactly: each
+  pane has 50,000 LF-terminated ASCII lines. In each pane, lines 0–42,879 have
+  104 payload bytes and lines 42,880–49,999 have 103 payload bytes, for exactly
+  5 MiB per pane and 10 MiB total including LF bytes. A line's payload starts
+  with `L%05d:` for its zero-based line index; fill the remaining payload bytes
+  with `byte('a' + (lineIndex+payloadOffset)%26)`, where payloadOffset is
+  zero-based after the prefix. The right pane initially matches the left, then
+  on lines divisible by 1,000 changes the first payload byte after the prefix to
+  the next lowercase alphabet character, wrapping `z` to `a`. This yields 50
+  one-byte changed lines, no insertions or deletions, identical line counts and
+  line lengths, and an exact total input size of 10,485,760 bytes. Keep the
+  fixture generator deterministic and version it with this fixture name.
+- Add a documented `just bench` recipe that runs the relevant benchmarks with
+  repeatable flags and keeps benchmark output outside the source tree by
+  default.
+- Measure input-to-visible-text latency separately from settled diff latency,
+  plus allocations and peak resident memory where the platform tooling permits.
+- Implement a documented timeout/fallback for adversarial comparisons that
+  returns a usable coarse changed region and status warning no later than 2 s
+  after comparison starts instead of blocking the UI. Keep at most one active
+  and one latest pending snapshot pair; timeouts must not strand unbounded
+  workers or snapshots.
+- Cache line display widths by content version, line, pane width, tab size, and
+  wrap mode. Invalidate only affected lines on edit and all affected heights on
+  resize or relevant configuration changes.
+- Avoid repeated whole-document copies where safe immutable line snapshots are
+  available. Do not introduce incremental diff or tree structures without
+  benchmark evidence.
+
+Out of scope:
+
+- Changing the performance targets without recording reference machine,
+  terminal, input shape, and measured evidence.
+- Hiding lag by suppressing diff output or treating all large documents as
+  unchanged.
+
+Acceptance criteria:
+
+- Benchmarks record machine/OS/Go version, input shapes, latency distributions,
+  allocations, and memory observations in a reproducible report.
+- On the reference profile of Ubuntu 24.04 Linux/amd64, 4 vCPUs, and 8 GiB RAM,
+  with the exact Go 1.26.x patch version recorded, each adversarial comparison
+  either completes or installs its coarse fallback within 2 s of worker start.
+  Peak process RSS for `rss-10mib-100k-balanced-near-equal-v1` must remain at or
+  below 512 MiB. The benchmark report includes its exact generated input
+  parameters and measured RSS; these limits are regression gates, not claims
+  about every user machine.
+- Targets from [`micro_diff_editor.md`](micro_diff_editor.md) are met, or the
+  plan is updated with measured rationale and an explicit owner decision before
+  accepting a revised target.
+- A 1 MiB paste becomes visible within 250 ms on the documented reference setup;
+  event handling remains responsive while diff work runs.
+- The comparison queue remains bounded under sustained edits; cancellation,
+  timeout, and shutdown leave no worker or retained snapshot leak.
+- Each adversarial input completes or triggers the documented coarse fallback
+  within 2 s of worker start and still produces aligned, navigable output.
+- `just format`, `just lint`, `just test`, `just test-race`, `just build`, and
+  the benchmark command pass.
+
+Verification:
+
+- `just format`
+- `just lint`
+- `just test`
+- `just test-race`
+- `just build`
+- `just bench`
+
+Handoff:
+
+- Record baseline and final results, any target changes, fallback thresholds,
+  cache invalidation rules, and evidence for every optimization retained.
+
+### TASK-010 - Complete release readiness and platform verification
+
+State: NEW
+
+Goal:
+
+- Prepare a reviewable release candidate with accurate user documentation,
+  preserved licenses, verified no-file workflow, and repeatable Linux/macOS
+  build and terminal checks.
+
+Dependencies:
+
+- TASK-003 through TASK-009 are `COMPLETED`.
+- Existing Go scaffold, Just recipes, CI workflows, and Jujutsu conventions
+  remain the project's supported development path.
+
+Scope:
+
+- Update `README.md`, `docs/`, `design_docs/`, `justfile`, and
+  `.github/workflows/ci.yml` as needed; preserve upstream files and notices
+  under `internal/micro/`.
+- Document launch, focus, editing, paste, diff navigation, scrolling, wrapping,
+  resize, config compatibility, plugin opt-in warning, quit, and lack of file
+  open/save behavior in the user-facing README/help.
+- Verify all Micro and third-party license notices, vendored-source pin and
+  local patch inventory, and the documented upstream refresh process.
+- Review CLI behavior for unsupported positional arguments and flags; failures
+  must occur before entering raw terminal mode and must not create files.
+- Exercise release build reproducibility and CI on supported Linux/macOS
+  targets, including PTY gates where available, dependency audit, and terminal
+  cleanup on normal quit and catchable interruption.
+- Check byte-for-byte reproducibility separately on each supported release
+  runner: from the same clean revision, Go patch version, dependency sums,
+  environment, and flags, build the `mdiff` executable twice into distinct
+  temporary paths using
+  `go build -buildvcs=false -trimpath -ldflags="-s -w" -o "$tmp/mdiff" ./cmd/mdiff`
+  and require `cmp` equality. Run this on Ubuntu 24.04/Linux amd64 and macOS 15
+  on the runner's native architecture; do not compare hashes across operating
+  systems or architectures. Record command, toolchain, target, and SHA-256 of
+  the verified artifact for each runner.
+- Add a pinned/documented `just audit` command and CI job for Go dependency
+  vulnerability/license checks, using a maintained Go-aware scanner and explicit
+  tool version rather than fetching an unpinned latest binary.
+- Use `jj` and `difftastic` for local change review where available; keep
+  release artifacts and generated diagnostics out of the source change unless
+  the project explicitly tracks them.
+
+Out of scope:
+
+- Adding file arguments, open/save/Save As, or persistent document storage.
+- Claiming macOS/terminal compatibility that has not run in CI or a documented
+  manual verification environment.
+
+Acceptance criteria:
+
+- User documentation matches the tested action/config/plugin compatibility
+  matrix and explicitly states that buffers are memory-only with no save path.
+- License and notice inventory matches the shipped Micro source and direct
+  dependencies; upstream pin and patch refresh steps are reproducible.
+- Linux and macOS CI build, lint, test, and release-build jobs pass; PTY checks
+  pass on supported runners or have a documented platform-specific reason for
+  being skipped.
+- The two same-runner release builds are byte-identical for each supported
+  target. The workflow records the target and verified SHA-256; a mismatch is a
+  release blocker that must be diagnosed before acceptance.
+- CLI rejection, terminal restoration, normal exit, and interrupt after edits
+  are verified without buffer, backup, recovery, or config writes in default
+  mode.
+- The complete `just check` gate passes on a clean working copy and the release
+  notes list known limitations, including disabled-by-default trusted plugins.
+
+Verification:
+
+- `just format`
+- `just check`
+- `just audit`
+- Linux/macOS CI workflow and dependency audit.
+- The documented upstream source/license verification procedure.
+
+Handoff:
+
+- Record CI run links or job identifiers, release build hashes, license audit
+  results, known compatibility limits, and final acceptance evidence. Rufus
+  performs the release-readiness review and marks TASK-010 `COMPLETED` only
+  after all criteria pass.
