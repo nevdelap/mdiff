@@ -173,8 +173,10 @@ func (la *LineArray) Bytes() []byte {
 	b := new(bytes.Buffer)
 	// initsize should provide a good estimate
 	b.Grow(int(la.initsize + 4096))
-	for i, l := range la.lines {
-		b.Write(l.data)
+	for i := range la.lines {
+		// Index the data field directly. Copying a Line value also reads its
+		// asynchronously updated syntax state, match, and mutex fields.
+		b.Write(la.lines[i].data)
 		if i != len(la.lines)-1 {
 			if la.Endings == FFDos {
 				b.WriteByte('\r')

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	luar "layeh.com/gopher-luar"
@@ -69,6 +70,9 @@ var (
 // that have the same file open
 type SharedBuffer struct {
 	*LineArray
+	// syntaxMu serializes text mutations and writes of computed syntax metadata.
+	syntaxMu       sync.Mutex
+	contentVersion atomic.Uint64
 	// Stores the last modification time of the file the buffer is pointing to
 	ModTime time.Time
 	// Type of the buffer (e.g. help, raw, scratch etc..)
@@ -190,7 +194,7 @@ func (b *SharedBuffer) MarkModified(start, end int) {
 	start = util.Clamp(start, 0, len(b.lines)-1)
 	end = util.Clamp(end, 0, len(b.lines)-1)
 
-	if b.Settings["syntax"].(bool) && b.SyntaxDef != nil {
+	if b.Settings["syntax"].(bool) && b.SyntaxDef != nil && !b.deferSyntaxRefresh(start, end) {
 		l := -1
 		for i := start; i <= end; i++ {
 			l = util.Max(b.Highlighter.ReHighlightStates(b, i), l)
@@ -201,6 +205,20 @@ func (b *SharedBuffer) MarkModified(start, end int) {
 	for i := start; i <= end; i++ {
 		b.LineArray.invalidateSearchMatches(i)
 	}
+}
+
+func (b *SharedBuffer) deferSyntaxRefresh(start, end int) bool {
+	if end-start >= 1000 {
+		return true
+	}
+	bytes := 0
+	for line := start; line <= end && line >= 0 && line < len(b.lines); line++ {
+		bytes += len(b.lines[line].data)
+		if bytes >= 64*1024 {
+			return true
+		}
+	}
+	return false
 }
 
 // DisableReload disables future reloads of this sharedbuffer
@@ -831,6 +849,11 @@ func resolveIncludes(syndef *highlight.Def) {
 // UpdateRules updates the syntax rules and filetype for this buffer
 // This is called when the colorscheme changes
 func (b *Buffer) UpdateRules() {
+	// Rule replacement and snapshot capture must not overlap a text event. The
+	// worker processes only the detached snapshot and locks briefly to publish
+	// metadata when its version is still current.
+	b.syntaxMu.Lock()
+	defer b.syntaxMu.Unlock()
 	if !b.Type.Syntax {
 		return
 	}
@@ -1017,13 +1040,40 @@ func (b *Buffer) UpdateRules() {
 	if b.SyntaxDef != nil {
 		b.Highlighter = highlight.NewHighlighter(b.SyntaxDef)
 		if b.Settings["syntax"].(bool) {
+			definition := b.SyntaxDef
+			installedHighlighter := b.Highlighter
+			snapshot := b.makeHighlightSnapshot()
+			version := b.ContentVersion()
+			worker := highlight.NewHighlighter(definition)
 			go func() {
-				b.Highlighter.HighlightStates(b)
-				b.Highlighter.HighlightMatches(b, 0, b.End().Y)
+				worker.HighlightStates(snapshot)
+				worker.HighlightMatches(snapshot, 0, snapshot.LinesNum()-1)
+				b.syntaxMu.Lock()
+				defer b.syntaxMu.Unlock()
+				if b.ContentVersion() != version || b.Highlighter != installedHighlighter || b.LinesNum() != snapshot.LinesNum() {
+					return
+				}
+				for i := 0; i < snapshot.LinesNum(); i++ {
+					b.SetState(i, snapshot.State(i))
+					b.SetMatch(i, snapshot.Match(i))
+				}
 				screen.Redraw()
 			}()
 		}
 	}
+}
+
+func (b *Buffer) makeHighlightSnapshot() *highlightSnapshot {
+	snapshot := &highlightSnapshot{
+		lines:   make([][]byte, b.LinesNum()),
+		states:  make([]highlight.State, b.LinesNum()),
+		matches: make([]highlight.LineMatch, b.LinesNum()),
+	}
+	for line := range snapshot.lines {
+		snapshot.lines[line] = append([]byte(nil), b.LineBytes(line)...)
+		snapshot.states[line] = b.State(line)
+	}
+	return snapshot
 }
 
 // ClearMatches clears all of the syntax highlighting for the buffer

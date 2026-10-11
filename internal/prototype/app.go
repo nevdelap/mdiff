@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/compare"
@@ -32,22 +33,35 @@ type pane struct {
 
 // App owns the two transient buffers, panes, alignment, and shared viewport.
 type App struct {
-	left, right pane
-	layout      viewport.Layout
-	terminal    tcell.Screen
-	surface     tcell.SimulationScreen
-	paintScreen tcell.SimulationScreen
-	top         int
-	rows        int
-	cols        int
-	focus       viewport.Side
-	closed      bool
+	left, right    pane
+	layout         viewport.Layout
+	terminal       tcell.Screen
+	surface        tcell.SimulationScreen
+	paintScreen    tcell.SimulationScreen
+	top            int
+	rows           int
+	cols           int
+	focus          viewport.Side
+	closed         bool
+	coordinator    *diffCoordinator
+	versions       DiffVersions
+	layoutVersions DiffVersions
+	pairs          []compare.Pair
+	displayedLeft  []string
+	displayedRight []string
+	diffErr        error
+	handlingPaste  bool
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
 // nil as the screen initializes the real tcell terminal; tests pass a
 // SimulationScreen instead.
 func New(s tcell.Screen, configDir string) (*App, error) {
+	return NewWithDebounce(s, configDir, nil)
+}
+
+// NewWithDebounce constructs the app with an optional CLI debounce override.
+func NewWithDebounce(s tcell.Screen, configDir string, cliDebounceMS *int) (*App, error) {
 	if err := setConfigDir(configDir); err != nil {
 		return nil, err
 	}
@@ -59,6 +73,10 @@ func New(s tcell.Screen, configDir string) (*App, error) {
 		return nil, err
 	}
 	if err := config.InitColorscheme(); err != nil {
+		return nil, err
+	}
+	debounce, err := configuredDebounce(cliDebounceMS)
+	if err != nil {
 		return nil, err
 	}
 	// Command history belongs to Micro's command bar, which mdiff does not
@@ -113,13 +131,96 @@ func New(s tcell.Screen, configDir string) (*App, error) {
 	app := &App{
 		left:        pane{buf: leftBuf},
 		right:       pane{buf: rightBuf},
+		pairs:       compare.Align([]string{""}, []string{""}),
 		focus:       viewport.Left,
 		terminal:    screen.Screen,
 		paintScreen: paintScreen,
 		surface:     surface,
+		coordinator: newDiffCoordinator(debounce, nil, nil),
 	}
+	app.versions = DiffVersions{Left: leftBuf.ContentVersion(), Right: rightBuf.ContentVersion()}
+	app.displayedLeft, app.displayedRight = app.snapshots()
+	app.coordinator.AcceptCurrent(app.versions)
+	leftBuf.SetChangeHandler(func(change buffer.TextChange) { app.textChanged(viewport.Left, change) })
+	rightBuf.SetChangeHandler(func(change buffer.TextChange) { app.textChanged(viewport.Right, change) })
 	app.resize(s.Size())
 	return app, nil
+}
+
+func configuredDebounce(cliMS *int) (time.Duration, error) {
+	return resolveDebounce(config.ParsedSettings(), cliMS)
+}
+
+func resolveDebounce(settings map[string]any, cliMS *int) (time.Duration, error) {
+	ms := int(defaultDiffDebounce / time.Millisecond)
+	if cliMS != nil {
+		if *cliMS < 40 || *cliMS > 180 {
+			return 0, fmt.Errorf("--diff-debounce must be between 40 and 180 milliseconds")
+		}
+		return time.Duration(*cliMS) * time.Millisecond, nil
+	}
+	if value, ok := settings["mdiff"]; ok {
+		values, ok := value.(map[string]any)
+		if !ok {
+			return 0, fmt.Errorf("mdiff settings must be an object")
+		}
+		if setting, found := values["diff-debounce-ms"]; found {
+			switch value := setting.(type) {
+			case float64:
+				if value != float64(int(value)) {
+					return 0, fmt.Errorf("mdiff.diff-debounce-ms must be an integer from 40 through 180")
+				}
+				ms = int(value)
+			case int:
+				ms = value
+			default:
+				return 0, fmt.Errorf("mdiff.diff-debounce-ms must be an integer from 40 through 180")
+			}
+		}
+	}
+	if ms < 40 || ms > 180 {
+		return 0, fmt.Errorf("mdiff.diff-debounce-ms must be between 40 and 180 milliseconds")
+	}
+	return time.Duration(ms) * time.Millisecond, nil
+}
+
+func (a *App) textChanged(side viewport.Side, change buffer.TextChange) {
+	if side == viewport.Left {
+		a.versions.Left = change.Version
+	} else {
+		a.versions.Right = change.Version
+	}
+	pasteBytes, pasteNewlines := 0, 0
+	if a.handlingPaste {
+		pasteBytes, pasteNewlines = change.InsertedBytes, change.InsertedNewlines
+	}
+	a.coordinator.MarkDirty(a.versions, pasteBytes, pasteNewlines)
+}
+
+func (a *App) isDiffStale() bool {
+	return a.layoutVersions != a.versions || a.coordinator.Stale()
+}
+
+func (a *App) installDiff(result diffResult) {
+	completed, current, restartNow := a.coordinator.Complete(result)
+	if !current {
+		if restartNow {
+			left, right := a.snapshots()
+			a.coordinator.DebounceElapsed(diffSnapshot{left: left, right: right, versions: a.versions})
+		}
+		return
+	}
+	if completed.err != nil {
+		a.diffErr = completed.err
+		return
+	}
+	anchor := a.captureAnchor()
+	a.pairs = completed.pairs
+	a.displayedLeft = append([]string(nil), completed.snapshot.left...)
+	a.displayedRight = append([]string(nil), completed.snapshot.right...)
+	a.expandWithAnchor(anchor, completed.snapshot.left, completed.snapshot.right)
+	a.layoutVersions = completed.snapshot.versions
+	a.diffErr = nil
 }
 
 func setConfigDir(flagDir string) error {
@@ -149,7 +250,12 @@ func setConfigDir(flagDir string) error {
 
 // Run drives tcell until a quit key, interrupt, or terminal termination.
 func Run(configDir string) error {
-	app, err := New(nil, configDir)
+	return RunWithDebounce(configDir, nil)
+}
+
+// RunWithDebounce uses a validated CLI override when present.
+func RunWithDebounce(configDir string, debounceMS *int) error {
+	app, err := NewWithDebounce(nil, configDir, debounceMS)
 	if err != nil {
 		return err
 	}
@@ -173,18 +279,7 @@ func Run(configDir string) error {
 		}
 	}()
 
-	app.draw()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case event := <-events:
-			if app.handle(event) {
-				return nil
-			}
-			app.draw()
-		}
-	}
+	return RunWithSignals(ctx, app, events)
 }
 
 // Close uses the transient Micro finalizer and restores the terminal exactly
@@ -194,6 +289,9 @@ func (a *App) Close() {
 		return
 	}
 	a.closed = true
+	if a.coordinator != nil {
+		a.coordinator.Close()
+	}
 	if screen.Screen == a.terminal || screen.Screen == a.surface || screen.Screen == a.paintScreen {
 		screen.Screen = nil
 	}
@@ -256,7 +354,7 @@ func (a *App) resize(cols, rows int) {
 		p.view.SetActive((i == 0 && a.focus == viewport.Left) || (i == 1 && a.focus == viewport.Right))
 		p.h = action.NewBufPane(p.buf, p.view, nil)
 	}
-	a.rebuildWithAnchor(anchor)
+	a.expandWithAnchor(anchor, a.displayedLeft, a.displayedRight)
 }
 
 func (a *App) snapshots() ([]string, []string) {
@@ -291,20 +389,28 @@ func (a *App) captureAnchor() anchor {
 	}
 	rowIndex := min(max(a.top, 0), len(a.layout.Rows)-1)
 	row := a.layout.Rows[rowIndex]
-	side, cell, p := viewport.Left, row.Left, &a.left
+	side, cell := viewport.Left, row.Left
 	if cell.Spacer {
-		side, cell, p = viewport.Right, row.Right, &a.right
+		side, cell = viewport.Right, row.Right
 	}
 	if cell.Spacer || cell.Line < 0 {
 		return anchor{fallback: rowIndex}
 	}
+	lines := a.displayedLeft
+	if side == viewport.Right {
+		lines = a.displayedRight
+	}
+	if cell.Line < 0 || cell.Line >= len(lines) {
+		return anchor{fallback: rowIndex}
+	}
+	text := lines[cell.Line]
 	occurrence := 0
 	for i := 0; i < cell.Line; i++ {
-		if p.buf.Line(i) == p.buf.Line(cell.Line) {
+		if lines[i] == text {
 			occurrence++
 		}
 	}
-	return anchor{side: side, text: p.buf.Line(cell.Line), occurrence: occurrence, wrapRow: cell.WrapRow, fallback: rowIndex, valid: true}
+	return anchor{side: side, text: text, occurrence: occurrence, wrapRow: cell.WrapRow, fallback: rowIndex, valid: true}
 }
 
 func (a *App) ensureCursorVisible() {
@@ -370,27 +476,42 @@ func (a *App) handle(event tcell.Event) bool {
 			return false
 		}
 		p := a.focusedPane()
-		before := a.captureAnchor()
 		p.h.HandleEvent(e)
 		p.buf.UpdateRules()
-		a.rebuildWithAnchor(before)
+		a.ensureCursorVisible()
 	case *tcell.EventPaste:
-		before := a.captureAnchor()
 		p := a.focusedPane()
+		a.handlingPaste = true
 		p.h.HandleEvent(e)
+		a.handlingPaste = false
 		p.buf.UpdateRules()
-		a.rebuildWithAnchor(before)
+		a.ensureCursorVisible()
 	}
 	return false
 }
 
 func (a *App) rebuildWithAnchor(previous anchor) {
 	left, right := a.snapshots()
-	a.layout = viewport.Expand(
-		compare.Align(left, right),
-		func(line int) int { return a.wrapHeight(&a.left, line) },
-		func(line int) int { return a.wrapHeight(&a.right, line) },
-	)
+	a.pairs = compare.Align(left, right)
+	a.displayedLeft = append([]string(nil), left...)
+	a.displayedRight = append([]string(nil), right...)
+	a.expandWithAnchor(previous, left, right)
+	if a.coordinator != nil {
+		a.versions = DiffVersions{Left: a.left.buf.ContentVersion(), Right: a.right.buf.ContentVersion()}
+	}
+	a.diffErr = nil
+	if a.coordinator != nil {
+		a.coordinator.AcceptCurrent(a.versions)
+	}
+	a.layoutVersions = a.versions
+}
+
+func (a *App) expandWithAnchor(previous anchor, snapshots ...[]string) {
+	left, right := a.snapshots()
+	if len(snapshots) == 2 {
+		left, right = snapshots[0], snapshots[1]
+	}
+	a.layout = layoutFor(a.pairs, func(line int) int { return a.wrapHeight(&a.left, line) }, func(line int) int { return a.wrapHeight(&a.right, line) })
 	a.restoreAnchor(previous, left, right)
 	a.ensureCursorVisible()
 }
@@ -567,6 +688,12 @@ func (a *App) draw() {
 		screen.SetContent(a.left.width, y, '│', nil, config.DefStyle)
 	}
 	footer := " F6: switch   Ctrl-Up/Down: scroll   Alt-Up/Down: diff   Ctrl-Q: quit "
+	if a.isDiffStale() {
+		footer = " Diff updating… " + footer
+	}
+	if a.diffErr != nil {
+		footer = " Diff error: " + a.diffErr.Error() + " | " + footer
+	}
 	if action.InfoBar != nil && action.InfoBar.HasMessage {
 		footer = " " + action.InfoBar.Msg + " |" + footer
 	}
@@ -621,10 +748,20 @@ func (a *App) cursorPosition() (x, y int, visible bool) {
 // RunWithSignals is useful to tests that need to exercise interruption without
 // starting a real terminal screen.
 func RunWithSignals(ctx context.Context, a *App, events <-chan tcell.Event) error {
+	a.draw()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-a.coordinator.TimerC():
+			// Capture snapshots on the application goroutine. Workers receive only
+			// detached strings and version numbers.
+			left, right := a.snapshots()
+			a.coordinator.DebounceElapsed(diffSnapshot{left: left, right: right, versions: a.versions})
+			a.draw()
+		case result := <-a.coordinator.Results():
+			a.installDiff(result)
+			a.draw()
 		case event, ok := <-events:
 			if !ok {
 				return errors.New("event stream closed")

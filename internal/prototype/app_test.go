@@ -2,7 +2,10 @@ package prototype
 
 import (
 	"os"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/compare"
@@ -38,6 +41,10 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 	app.handle(tcell.NewEventPaste(leftText, ""))
 	app.handle(tcell.NewEventKey(tcell.KeyF6, 0, tcell.ModNone, ""))
 	app.handle(tcell.NewEventPaste(rightText, ""))
+	flushDiffForTest(t, app)
+	if app.versions.Left != 1 || app.versions.Right != 1 {
+		t.Fatalf("bracketed paste versions = %#v, want one edit per pane", app.versions)
+	}
 	if app.left.buf.Line(1) != "two" || app.right.buf.Line(1) != "inserted" {
 		t.Fatalf("paste did not update independent buffers: left=%q right=%q", app.left.buf.Line(1), app.right.buf.Line(1))
 	}
@@ -50,6 +57,10 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 	app.focus = viewport.Right
 	app.setFocus()
 	app.handle(tcell.NewEventKey(tcell.KeyCtrlZ, 0, tcell.ModCtrl, ""))
+	flushDiffForTest(t, app)
+	if app.versions.Left != 1 || app.versions.Right != 2 {
+		t.Fatalf("undo advanced unexpected versions: %#v", app.versions)
+	}
 	if app.right.buf.LinesNum() != 1 || app.right.buf.Line(0) != "" {
 		t.Fatalf("Micro undo did not revert only the right pane: line count=%d line0=%q", app.right.buf.LinesNum(), app.right.buf.Line(0))
 	}
@@ -57,6 +68,10 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 		t.Fatal("undo in the right pane changed the left buffer")
 	}
 	app.handle(tcell.NewEventKey(tcell.KeyCtrlY, 0, tcell.ModCtrl, ""))
+	flushDiffForTest(t, app)
+	if app.versions.Left != 1 || app.versions.Right != 3 {
+		t.Fatalf("redo advanced unexpected versions: %#v", app.versions)
+	}
 	if app.right.buf.Line(1) != "inserted" {
 		t.Fatalf("Micro redo did not restore the right pane: line count=%d line1=%q", app.right.buf.LinesNum(), app.right.buf.Line(1))
 	}
@@ -114,7 +129,7 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 		t.Fatal("expected a real logical row to anchor the viewport")
 	}
 	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "added above\n")
-	app.rebuildWithAnchor(anchor)
+	flushDiffForTest(t, app)
 	cell := app.layout.Rows[app.top].Left
 	if anchor.side == viewport.Right {
 		cell = app.layout.Rows[app.top].Right
@@ -145,6 +160,96 @@ func TestSimulationEditingAlignmentScrollResizeAndNoWrite(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("transient editor wrote configuration or buffer state: %v", entries)
+	}
+}
+
+func flushDiffForTest(t *testing.T, app *App) {
+	t.Helper()
+	if !app.coordinator.Stale() {
+		return
+	}
+	left, right := app.snapshots()
+	app.coordinator.DebounceElapsed(diffSnapshot{left: left, right: right, versions: app.versions})
+	select {
+	case result := <-app.coordinator.Results():
+		app.installDiff(result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for comparison")
+	}
+}
+
+func TestLargePasteStaysResponsiveAndInstallsFinalAlignment(t *testing.T) {
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(48, 8)
+	app, err := New(sim, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	large := strings.Repeat("x", largePasteBytes)
+	started := time.Now()
+	app.handle(tcell.NewEventPaste(large, ""))
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("large paste blocked event handling for %s", elapsed)
+	}
+	if !app.isDiffStale() {
+		t.Fatal("large paste did not mark the visible alignment stale")
+	}
+	app.draw()
+	var footer strings.Builder
+	for x := 0; x < app.cols; x++ {
+		r, _, _, _ := sim.GetContent(x, app.rows)
+		footer.WriteRune(r)
+	}
+	if !strings.Contains(footer.String(), "Diff updating") {
+		t.Fatalf("stale diff footer missing: %q", footer.String())
+	}
+	if got := debounceDelay(app.coordinator.baseDelay, largePasteBytes, 0); got != app.coordinator.baseDelay+20*time.Millisecond {
+		t.Fatalf("large paste delay = %s", got)
+	}
+	select {
+	case <-app.coordinator.TimerC():
+	case <-time.After(2 * time.Second):
+		t.Fatal("large paste debounce did not expire")
+	}
+	left, right := app.snapshots()
+	app.coordinator.DebounceElapsed(diffSnapshot{left: left, right: right, versions: app.versions})
+	select {
+	case result := <-app.coordinator.Results():
+		app.installDiff(result)
+	case <-time.After(2 * time.Second):
+		t.Fatal("large paste comparison did not complete")
+	}
+	editStarted := time.Now()
+	app.handle(tcell.NewEventKey(tcell.KeyRune, 'y', tcell.ModNone, ""))
+	if elapsed := time.Since(editStarted); elapsed > time.Second {
+		t.Fatalf("editing the large fixture blocked event handling for %s", elapsed)
+	}
+	flushDiffForTest(t, app)
+	left, right = app.snapshots()
+	if app.isDiffStale() || !reflect.DeepEqual(app.pairs, compare.Align(left, right)) {
+		t.Fatal("alignment did not converge to the final buffer snapshots")
+	}
+}
+
+func TestNavigationDoesNotAdvanceBufferVersions(t *testing.T) {
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(sim, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	before := app.versions
+	app.handle(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone, ""))
+	if app.versions != before || app.coordinator.Stale() {
+		t.Fatalf("navigation scheduled a content comparison: versions=%#v stale=%t", app.versions, app.coordinator.Stale())
 	}
 }
 

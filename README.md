@@ -27,6 +27,11 @@ indentation/completion behavior. Press `Ctrl-Q` to exit. Micro settings and
 colorschemes are read from the user's Micro configuration; plugins are not
 loaded.
 
+Diff updates use an 80 ms debounce by default. Set
+`"mdiff": {"diff-debounce-ms": 100}` in Micro's `settings.json` or pass
+`--diff-debounce MS` to choose a value from 40 through 180 ms; the command-line
+value takes precedence. Large paste events add 20 ms, up to a 200 ms maximum.
+
 ## Development
 
 See [docs/development.md](docs/development.md) for setup, formatting, linting,

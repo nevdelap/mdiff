@@ -360,7 +360,7 @@ Handoff:
 
 ### TASK-004 - Add versioned debounced diff updates
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -437,6 +437,56 @@ Handoff:
 - Record debounce measurements, shutdown behavior, queue bounds, and any
   cancellation limitation. Include a trace or test proving that an obsolete
   result cannot replace a newer alignment.
+- Implemented `EventHandler` change notifications and monotonic per-buffer
+  versions. Successful insertion, deletion, replacement, undo, redo, search
+  replacement, and Micro action edits report through the shared mutation
+  boundary; cursor navigation does not change versions. Notifications include
+  inserted UTF-8 bytes and newline counts so bracketed paste can select the
+  large-paste delay.
+- Added a single app-owned coordinator with an injectable timer and comparison
+  function. It uses an 80 ms default, accepts 40–180 ms from the `mdiff` object
+  in Micro `settings.json`, and honors `--diff-debounce` over that setting.
+  Large paste events (at least 256 KiB or 10,000 inserted newlines) add 20 ms,
+  capped at 200 ms. Every mutation resets the timer; navigation leaves it alone.
+- The app goroutine captures detached line strings and version pairs after the
+  timer fires. A worker runs the pinned line and rune comparison over those
+  snapshots only. At most one comparison runs and one newest snapshot waits. The
+  pinned comparison API has no cancellation hook, so running work is allowed to
+  finish; a mismatched result is discarded and the newest pending pair starts
+  immediately. A regression test verifies that when `v2` is pending and a new
+  edit creates `v3`, the obsolete active result triggers a fresh `v3` capture
+  and `v2` never starts.
+- The last valid alignment remains visible with a `Diff updating…` footer while
+  work is pending. Its immutable displayed snapshots keep viewport anchors tied
+  to the visual map even if edits shift live line numbers. A matching result
+  swaps the pairs, displayed snapshots, anchor mapping, and expanded layout on
+  the event-loop goroutine. Errors retain the last map and show a footer error.
+  Shutdown stops the timer and joins the running finite comparison before
+  closing Micro buffers and restoring the terminal.
+- `just test-race` initially exposed races in Micro's asynchronous syntax path.
+  Syntax workers now compute against detached line snapshots and publish state
+  only if the captured buffer version and highlighter still match. The shared
+  buffer lock serializes text events with snapshot capture and style install; an
+  atomic content version changes inside the same text-event lock. Large changed
+  ranges defer synchronous rehighlighting to this snapshot worker so a follow-up
+  keystroke does not wait for a full large-line scan. `LineArray.Bytes` indexes
+  each line's data instead of copying whole `Line` values and their
+  asynchronously updated syntax fields. Syntax highlighting stays enabled, and
+  the complete race suite passes.
+- Added buffer mutation/version tests; deterministic fake-timer tests for
+  debounce boundaries, timer resets, coalescing, stale result rejection,
+  snapshot ownership, errors, and shutdown; app tests for navigation, anchor
+  stability, and a 256 KiB paste that converges to the final snapshots; and
+  retained the PTY paste/scroll/resize/terminal-restoration test.
+- Verification passed: `just format`, `just lint`, `just test`,
+  `just test-race`, and `just build`. The first race run exposed the Micro
+  syntax worker race, and the large-fixture test also measured a 1.55 s delay on
+  a follow-up edit while syntax work overlapped. Detached syntax snapshots,
+  synchronized metadata publication, and deferred large-range rehighlighting
+  resolved both issues. The final 256 KiB paste-and-edit test kept each event
+  under its 2 s/1 s responsiveness bounds, used the configured paste delay plus
+  20 ms, showed the stale footer, and installed an alignment matching final
+  snapshots.
 
 ### TASK-005 - Complete Micro editing behavior
 

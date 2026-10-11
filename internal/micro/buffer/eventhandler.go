@@ -44,11 +44,15 @@ type Delta struct {
 // DoTextEvent runs a text event
 func (eh *EventHandler) DoTextEvent(t *TextEvent, useUndo bool) {
 	oldl := eh.buf.LinesNum()
+	insertedBytes, insertedNewlines := insertedTextStats(t)
 
 	if useUndo {
-		eh.Execute(t)
+		if !eh.Execute(t) {
+			return
+		}
 	} else {
 		ExecuteTextEvent(t, eh.buf)
+		eh.notifyChange(insertedBytes, insertedNewlines)
 	}
 
 	if len(t.Deltas) != 1 {
@@ -114,6 +118,8 @@ func (eh *EventHandler) DoTextEvent(t *TextEvent, useUndo bool) {
 
 // ExecuteTextEvent runs a text event
 func ExecuteTextEvent(t *TextEvent, buf *SharedBuffer) {
+	buf.syntaxMu.Lock()
+	defer buf.syntaxMu.Unlock()
 	if t.EventType == TextEventInsert {
 		for _, d := range t.Deltas {
 			buf.insert(d.Start, d.Text)
@@ -133,6 +139,9 @@ func ExecuteTextEvent(t *TextEvent, buf *SharedBuffer) {
 			t.Deltas[i], t.Deltas[j] = t.Deltas[j], t.Deltas[i]
 		}
 	}
+	if len(t.Deltas) > 0 {
+		buf.contentVersion.Add(1)
+	}
 }
 
 // UndoTextEvent undoes a text event
@@ -148,6 +157,42 @@ type EventHandler struct {
 	active    int
 	UndoStack *TEStack
 	RedoStack *TEStack
+	onChange  func(TextChange)
+}
+
+// TextChange describes one successfully applied mutation of a buffer.
+// InsertedBytes and InsertedNewlines count text added by this event.
+type TextChange struct {
+	Version          uint64
+	InsertedBytes    int
+	InsertedNewlines int
+}
+
+// SetChangeHandler installs the owner notification for successful text edits.
+func (eh *EventHandler) SetChangeHandler(handler func(TextChange)) {
+	eh.onChange = handler
+}
+
+// ContentVersion is monotonic for this buffer and advances on each text event.
+func (eh *EventHandler) ContentVersion() uint64 { return eh.buf.contentVersion.Load() }
+
+func insertedTextStats(t *TextEvent) (int, int) {
+	if t.EventType != TextEventInsert && t.EventType != TextEventReplace {
+		return 0, 0
+	}
+	totalBytes, newlines := 0, 0
+	for _, delta := range t.Deltas {
+		totalBytes += len(delta.Text)
+		newlines += bytes.Count(delta.Text, []byte{'\n'})
+	}
+	return totalBytes, newlines
+}
+
+func (eh *EventHandler) notifyChange(insertedBytes, insertedNewlines int) {
+	change := TextChange{Version: eh.ContentVersion(), InsertedBytes: insertedBytes, InsertedNewlines: insertedNewlines}
+	if eh.onChange != nil {
+		eh.onChange(change)
+	}
 }
 
 // NewEventHandler returns a new EventHandler
@@ -235,7 +280,8 @@ func (eh *EventHandler) Replace(start, end Loc, replace string) {
 }
 
 // Execute a textevent and add it to the undo stack
-func (eh *EventHandler) Execute(t *TextEvent) {
+func (eh *EventHandler) Execute(t *TextEvent) bool {
+	insertedBytes, insertedNewlines := insertedTextStats(t)
 	if eh.RedoStack.Len() > 0 {
 		eh.RedoStack = new(TEStack)
 	}
@@ -247,10 +293,12 @@ func (eh *EventHandler) Execute(t *TextEvent) {
 	}
 
 	if !b {
-		return
+		return false
 	}
 
 	ExecuteTextEvent(t, eh.buf)
+	eh.notifyChange(insertedBytes, insertedNewlines)
+	return true
 }
 
 // Undo the first event in the undo stack. Returns false if the stack is empty.

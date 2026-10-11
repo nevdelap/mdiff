@@ -3,6 +3,7 @@ package highlight
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
 
 func sliceStart(slc []byte, index int) []byte {
@@ -67,6 +68,7 @@ type LineStates interface {
 
 // A Highlighter contains the information needed to highlight a string
 type Highlighter struct {
+	mu         sync.Mutex
 	lastRegion *region
 	Def        *Def
 }
@@ -289,6 +291,8 @@ func (h *Highlighter) HighlightString(input string) []LineMatch {
 
 // HighlightStates correctly sets all states for the buffer
 func (h *Highlighter) HighlightStates(input LineStates) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for i := 0; ; i++ {
 		input.Lock()
 		if i >= input.LinesNum() {
@@ -316,6 +320,8 @@ func (h *Highlighter) HighlightStates(input LineStates) {
 // It sets all other matches in the buffer to nil to conserve memory
 // This assumes that all the states are set correctly
 func (h *Highlighter) HighlightMatches(input LineStates, startline, endline int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	for i := startline; i <= endline; i++ {
 		input.Lock()
 		if i >= input.LinesNum() {
@@ -342,6 +348,8 @@ func (h *Highlighter) HighlightMatches(input LineStates, startline, endline int)
 // for each line until it comes across a line whose state does not change
 // returns the number of the final line
 func (h *Highlighter) ReHighlightStates(input LineStates, startline int) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	// lines := input.LineData()
 
 	h.lastRegion = nil
