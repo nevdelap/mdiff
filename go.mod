@@ -2,11 +2,12 @@ module github.com/nevdelap/mdiff
 
 require (
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/creack/pty v1.1.18
 	github.com/dustin/go-humanize v1.0.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/mattn/go-runewidth v0.0.16
 	github.com/micro-editor/json5 v1.0.1-micro
-	github.com/micro-editor/tcell/v2 v2.0.13
+	github.com/micro-editor/tcell/v2 v2.2.4
 	github.com/micro-editor/terminal v0.0.0-20250324214352-e587e959c6b5
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/sergi/go-diff v1.1.0
@@ -20,13 +21,12 @@ require (
 )
 
 require (
-	github.com/creack/pty v1.1.18 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/gdamore/encoding v1.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.0.3 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rivo/uniseg v0.2.0 // indirect
-	github.com/zyedidia/poller v1.0.1 // indirect
+	github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778 // indirect
 	golang.org/x/sys v0.30.0 // indirect
 	golang.org/x/term v0.29.0 // indirect
 )
