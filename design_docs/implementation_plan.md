@@ -788,7 +788,7 @@ Implementation handoff:
 
 ### TASK-006 - Load Micro configuration safely
 
-State: REVIEW
+State: COMPLETED
 
 Goal:
 
@@ -897,9 +897,11 @@ Handoff:
   configured backups/autosave remain enabled.
 - Both panes receive Micro's parsed options and synthetic filetype settings.
   Configured bindings are loaded with mdiff lifecycle controls reserved;
-  unsupported bindings and malformed syntax are reported without blocking
-  startup. Shortcut labels follow supported remaps and the menu uses the active
-  colorscheme's statusline style.
+  unsupported bindings, including Micro actions that only change a private pane
+  viewport (`ScrollUp`, `ScrollDown`, `Center`, `Start`, `End`, `PageUp`,
+  `PageDown`, `HalfPageUp`, and `HalfPageDown`), and malformed syntax are
+  reported without blocking startup. Shortcut labels follow supported remaps and
+  the menu uses the active colorscheme's statusline style.
 - Tests cover valid, missing, and malformed configuration, unchanged user files,
   synthetic syntax selection, remapped/removed bindings, color fallback,
   configured backup behavior, and the existing autosave quit behavior.

@@ -233,6 +233,9 @@ func prototypeUnsafeAction(name string) bool {
 		name == "OpenFile" || name == "Quit" || name == "QuitAll" ||
 		name == "ForceQuit" || name == "ShellMode" || name == "CommandMode" ||
 		name == "Suspend" || name == "ToggleHelp" || name == "ToggleKeyMenu" ||
+		name == "Unsplit" || name == "ScrollUp" || name == "ScrollDown" || name == "Center" ||
+		name == "Start" || name == "End" || name == "PageUp" || name == "PageDown" ||
+		name == "HalfPageUp" || name == "HalfPageDown" ||
 		name == "PreviousTab" || name == "NextTab" || name == "FirstTab" || name == "LastTab" ||
 		name == "NextSplit" || name == "PreviousSplit" || name == "FirstSplit" || name == "LastSplit" ||
 		strings.HasPrefix(name, "AddTab") ||

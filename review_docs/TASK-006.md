@@ -2,41 +2,41 @@
 
 **Task:** Load Micro configuration safely  
 **Reviewer:** Rufus  
-**Review pass:** 1  
-**Decision:** CHANGES REQUIRED
+**Review pass:** 5  
+**Decision:** APPROVED
 
-## Findings
+## Findings resolved
 
-### 1. Medium — `Unsplit` binding can panic in mdiff
+### `Unsplit` binding could panic
 
-**Status:** Open
+**Status:** Resolved in pass 2
 
-`Unsplit` is present in Micro's buffer action map, but it is missing from
-`prototypeUnsafeAction`. A user can bind an otherwise ordinary key to
-`Unsplit`; mdiff accepts the binding and invokes the action. mdiff constructs
-each `BufPane` with a nil Micro tab, so `BufPane.Unsplit` dereferences that nil
-tab and panics. The task requires rejecting actions that are unavailable in
-mdiff's exactly-two-pane model and reporting an actionable diagnostic.
+`Unsplit` is rejected by `prototypeUnsafeAction`. A regression test loads a
+user binding to `Unsplit`, invokes it, and checks that mdiff stays open, retains
+both buffers and its layout, and reports that the action is unavailable.
 
-**Required resolution:** Reject `Unsplit` as an unavailable binding, with the
-usual status diagnostic, and add a regression test that loads such a binding
-and verifies invoking it neither panics nor changes the two-pane layout.
+Evidence: [`prototypeUnsafeAction`](/home/nevd/mdiff/internal/micro/action/bufpane.go:231)
+and [`TestConfiguredUnsplitActionIsRejectedWithoutChangingPanes`](/home/nevd/mdiff/internal/prototype/editing_test.go:418).
 
-Evidence: [`BufMapEvent`](/home/nevd/mdiff/internal/micro/action/bufpane.go:119)
-filters actions through `prototypeUnsafeAction`;
-[`prototypeUnsafeAction`](/home/nevd/mdiff/internal/micro/action/bufpane.go:231)
-does not include `Unsplit`;
-[`NewBufPane`](/home/nevd/mdiff/internal/prototype/app.go:451) receives a nil
-tab; and [`BufPane.Unsplit`](/home/nevd/mdiff/internal/micro/action/actions.go:2099)
-dereferences `h.tab` immediately.
+### Micro private-view scroll bindings
+
+**Status:** Resolved in pass 5
+
+`ScrollUp`, `ScrollDown`, `Center`, `Start`, `End`, `PageUp`, `PageDown`,
+`HalfPageUp`, and `HalfPageDown` are rejected because they change a private
+Micro pane viewport that mdiff does not render. The configured-binding test
+checks that each action reports unavailable and leaves the shared viewport
+unchanged. The compatibility matrix lists the exclusions.
+
+Evidence: [`prototypeUnsafeAction`](/home/nevd/mdiff/internal/micro/action/bufpane.go:231),
+[`TestConfiguredPrivateViewportActionsAreRejected`](/home/nevd/mdiff/internal/prototype/editing_test.go:448),
+and [`bindings.json` compatibility row](/home/nevd/mdiff/design_docs/micro_diff_editor.md:550).
 
 ## Review
 
-The configuration lookup and read-only startup, settings application to both
-panes, keybinding loading and labels, colorscheme handling, synthetic
-filetypes, and persistence settings have broad fixture coverage. This
-unfiltered tab action remains a crash path for a valid user configuration and
-blocks approval.
+Configuration lookup and read-only startup, settings application, colorscheme
+and syntax loading, lifecycle action filtering, and shared-viewport binding
+behavior meet TASK-006's acceptance criteria. No open findings remain.
 
 ## Verification
 

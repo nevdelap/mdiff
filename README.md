@@ -51,7 +51,10 @@ without creating config files or directories. Supported Micro buffer settings
 apply to both panes, including indentation, wrapping, ruler options, colors, and
 configured filetype. mdiff-owned pane switching, quitting, help, and diff
 navigation keys remain reserved. Unsupported keybinding actions are reported in
-the status area. Lua plugins are not loaded yet.
+the status area. Micro's private-view `ScrollUp`, `ScrollDown`, `Center`,
+`Start`, `End`, `PageUp`, `PageDown`, `HalfPageUp`, and `HalfPageDown` actions
+are also rejected because mdiff has one shared diff-aware viewport. Lua plugins
+are not loaded yet.
 
 Malformed settings and an unavailable selected colorscheme stop startup before
 raw terminal mode. Invalid bindings or syntax are reported without rewriting the

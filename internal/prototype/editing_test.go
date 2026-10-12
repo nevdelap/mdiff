@@ -415,6 +415,81 @@ func TestConfiguredUnsafeActionIsFilteredWithExplanation(t *testing.T) {
 	}
 }
 
+func TestConfiguredUnsplitActionIsRejectedWithoutChangingPanes(t *testing.T) {
+	configDir := t.TempDir()
+	bindings := []byte(`{"buffer":{"Ctrl-r":"Unsplit"}}`)
+	if err := os.WriteFile(filepath.Join(configDir, "bindings.json"), bindings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(80, 10)
+	app, err := New(sim, configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+
+	left, right := app.left.buf, app.right.buf
+	rows := len(app.layout.Rows)
+	if quit := app.handle(key(tcell.KeyCtrlR, 0, tcell.ModCtrl)); quit {
+		t.Fatal("rejected Unsplit binding terminated mdiff")
+	}
+	if app.left.buf != left || app.right.buf != right || len(app.layout.Rows) != rows {
+		t.Fatal("rejected Unsplit binding changed the two-pane layout")
+	}
+	if !strings.Contains(app.currentStatus(), "Unsplit is unavailable") {
+		t.Fatalf("rejected Unsplit diagnostic = %q", app.currentStatus())
+	}
+}
+
+func TestConfiguredPrivateViewportActionsAreRejected(t *testing.T) {
+	for _, actionName := range []string{
+		"ScrollUp", "ScrollDown", "Center", "Start", "End", "PageUp", "PageDown", "HalfPageUp", "HalfPageDown",
+	} {
+		t.Run(actionName, func(t *testing.T) {
+			configDir := t.TempDir()
+			bindings := []byte(`{"buffer":{"Ctrl-r":"` + actionName + `"}}`)
+			if err := os.WriteFile(filepath.Join(configDir, "bindings.json"), bindings, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			sim := tcell.NewSimulationScreen("")
+			if err := sim.Init(); err != nil {
+				t.Fatal(err)
+			}
+			sim.SetSize(80, 10)
+			app, err := New(sim, configDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer app.Close()
+
+			text := strings.Repeat("line\n", 20)
+			app.handle(tcell.NewEventPaste(text, ""))
+			app.focus = viewport.Right
+			app.setFocus()
+			app.handle(tcell.NewEventPaste(text, ""))
+			flushDiffForTest(t, app)
+			app.top = 2
+			beforeTop := app.top
+			if beforeTop <= 0 {
+				t.Fatalf("test viewport top %d is not scrolled", beforeTop)
+			}
+			if quit := app.handle(key(tcell.KeyCtrlR, 0, tcell.ModCtrl)); quit {
+				t.Fatal("rejected view action terminated mdiff")
+			}
+			if app.top != beforeTop {
+				t.Fatalf("rejected view action moved shared viewport from %d to %d", beforeTop, app.top)
+			}
+			if status := app.currentStatus(); !strings.Contains(status, actionName+" is unavailable") {
+				t.Fatalf("view action diagnostic = %q", status)
+			}
+		})
+	}
+}
+
 func newEditingTestApp(t *testing.T, width, height int) (*App, tcell.SimulationScreen) {
 	t.Helper()
 	sim := tcell.NewSimulationScreen("")
