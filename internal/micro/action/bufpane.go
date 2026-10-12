@@ -135,7 +135,7 @@ func BufMapEvent(k Event, action string) {
 			a = strings.SplitN(a, ":", 2)[1]
 			afn = LuaAction(a, k)
 			if afn == nil {
-				screen.TermMessage("Lua Error:", a, "does not exist")
+				config.AddDiagnostic("Lua binding is unavailable: " + a)
 				continue
 			}
 			split := strings.SplitN(a, ".", 2)
@@ -153,7 +153,7 @@ func BufMapEvent(k Event, action string) {
 			afn = f
 			names = append(names, a)
 		} else {
-			screen.TermMessage("Error in bindings: action", a, "does not exist")
+			config.AddDiagnostic("Error in bindings: action " + a + " does not exist")
 			continue
 		}
 		actionfns = append(actionfns, afn)

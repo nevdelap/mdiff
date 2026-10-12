@@ -539,23 +539,28 @@ which is reset by rendering and is not a stable change stream.
 
 Read the standard Micro config directory and file formats using Micro's normal
 precedence and filetype behavior. Preserve Micro's option values and keybinding
-action names. Do not copy defaults over user files or put mdiff-only settings
-into `settings.json`; mdiff-specific overrides belong in command flags or a
-namespaced `mdiff.json`/TOML file.
+action names. Do not copy defaults over user files. The `mdiff.diff-debounce-ms`
+override lives in a namespaced `mdiff` object in Micro's `settings.json`; the
+`--diff-debounce` command-line option takes precedence.
 
-| Micro feature                   | Planned behavior                                                                                                                                                                                                                                                                                                                                            | Compatibility limit                                                                                                                                           |
-| ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `settings.json` global options  | Apply Micro settings to both panes, including indentation, rendering, terminal colors, mouse, paste, wrapping, line numbers, file reload, backup, and save behavior. Use Micro's effective defaults and honor configured values.                                                                                                                            | Adapt only settings that require more than two panes or break shared diff alignment                                                                           |
-| `bindings.json`                 | Load Micro buffer bindings; cursor, selection, editing, clipboard, indentation, in-buffer autocomplete, undo/redo, search, Open, and Save actions apply to the focused pane                                                                                                                                                                                 | Only actions requiring more than two panes or breaking shared diff alignment are adapted; user remapping behavior is completed in TASK-006                    |
-| `colorschemes/`                 | Load selected scheme and use Micro's syntax and UI styles                                                                                                                                                                                                                                                                                                   | mdiff adds a documented small set of diff-specific style names, with sensible fallback when absent                                                            |
-| `syntax/`                       | Use Micro syntax definitions and filetype matching for each pane's loaded filename or explicit filetype                                                                                                                                                                                                                                                     | Adapt only filetype behavior that conflicts with the two-pane model                                                                                           |
-| Lua plugins and `plug/`         | Load configured plugins through Micro's normal startup and lifecycle                                                                                                                                                                                                                                                                                        | Adapt only behavior that requires more than two panes or breaks the shared diff viewport                                                                      |
-| Micro commands                  | Use Micro's command dispatcher and support ordinary Micro commands in the focused pane                                                                                                                                                                                                                                                                      | Adapt only commands that require more than two panes or break shared diff alignment                                                                           |
-| Micro clipboard                 | Use Micro's internal clipboard and configured external clipboard behavior                                                                                                                                                                                                                                                                                   | Adapt only clipboard behavior that requires more than two panes or breaks diff alignment                                                                      |
-| Bottom key menu and pane status | Render two comma-separated rows in Micro's exact key-menu order, prefixed by `^W Switch Panes`; use the active scheme's status-bar colors. Show `Left`/`Right` at the right of row one and `mdiff (wrapping micro) v0.0.1` at the right of row two. Each pane has a Micro status line with filename, cursor position, filetype, line endings, and encoding. | Adapt New Tab to replace the focused pane's document without adding a third pane; TASK-006 owns user-remapped labels and status-color compatibility/fallbacks |
+| Micro feature                | Observed behavior                                                                                                                                                           | Status and limitation                                                                                                                     |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Config directory             | `--config-dir`, `MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime files override embedded files.                                          | Supported. Missing config directories are not created.                                                                                    |
+| `settings.json`              | Micro options initialize both panes. Tested: indentation, tab size, wrapping, ruler/relative ruler, filetype, colorscheme, and `mdiff.diff-debounce-ms`; CLI debounce wins. | Partial. Pane/viewport-incompatible or unimplemented UI options have no effect. Malformed JSON fails before terminal mode.                |
+| `bindings.json`              | Micro buffer bindings load through Micro parsing. Supported shortcut labels follow remaps and omit removed/unavailable actions.                                             | Partial. Shell, Lua, unknown actions, and lifecycle-breaking actions are rejected. mdiff-owned keys stay reserved.                        |
+| `colorschemes/`              | The configured scheme styles syntax and UI; shortcut rows use its statusline style, with reversed Micro default fallback when absent.                                       | Supported for valid bundled/user schemes. Missing or malformed selected schemes fail before terminal mode. Diff styles have fallbacks.    |
+| `syntax/`                    | Micro syntax definitions load for filename detection and explicit configured filetypes, including unnamed buffers.                                                          | Partial. Invalid syntax is diagnosed and built-in defaults remain available; no filetype picker.                                          |
+| Lua plugins and `plug/`      | Not loaded in this task.                                                                                                                                                    | Unsupported until TASK-007.                                                                                                               |
+| Micro commands and clipboard | Supported commands and Micro clipboard methods work in the focused pane.                                                                                                    | Partial. Shell, tab/window, and independent viewport operations are unavailable or adapted; external clipboard depends on platform tools. |
+| Bottom menu and pane status  | Micro order and separators, supported remapped labels, active statusline colors, and Micro pane status fields are retained.                                                 | Partial. mdiff controls stay reserved; New Tab replaces the focused document to preserve two panes.                                       |
 
-Micro plugins execute with the same filesystem and process access they have in
-Micro. Load them through Micro's configured startup behavior and do not impose a
+Configuration is read-only: startup does not write defaults or modify source
+settings, bindings, schemes, or syntax files. Explicit Save and configured
+document backup/autosave may write document artifacts. `savecursor` and
+`saveundo` state serialization is disabled so mdiff never writes buffer state
+into the Micro config directory. When TASK-007 enables Micro plugins, they
+should execute with the same filesystem and process access they have in Micro.
+Load them through Micro's configured startup behavior and do not impose a
 separate opt-in or no-write restriction. Adapt a plugin only when its behavior
 requires more than two panes or breaks shared diff alignment; document any such
 case with evidence. Do not claim plugins are sandboxed.
@@ -583,7 +588,12 @@ and right-aligned metadata from colliding at supported terminal widths; reserve
 the status and both menu rows before calculating pane dimensions and keep the
 real terminal cursor in the active pane or prompt.
 
-TASK-006 resolves remapped labels from effective bindings and supplies status
+The labels above show the default Micro shortcuts. mdiff resolves each label
+from the effective supported binding after loading `bindings.json`, omits
+removed or unavailable actions, and keeps mdiff-owned controls pinned to their
+reserved keys.
+
+TASK-006 implements remapped labels from effective bindings and supplies status
 colors from the user's active Micro colorscheme. Any remaining behavior
 differences must be limited to the two-pane model and recorded with owner
 disposition.

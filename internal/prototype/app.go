@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -68,6 +69,7 @@ type App struct {
 	blockedSequence string
 	quitFlow        *quitFlow
 	quitComplete    bool
+	diagnostic      string
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
@@ -91,6 +93,8 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 	if err := setConfigDir(configDir); err != nil {
 		return nil, err
 	}
+	config.Diagnostics = nil
+	config.DisableBufferStateWrites = true
 	config.InitRuntimeFiles(true)
 	if err := config.ReadSettings(); err != nil {
 		return nil, err
@@ -169,6 +173,7 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 		paintScreen: paintScreen,
 		surface:     surface,
 		coordinator: newDiffCoordinator(debounce, nil, nil),
+		diagnostic:  strings.Join(config.Diagnostics, "; "),
 	}
 	app.versions = DiffVersions{Left: leftBuf.ContentVersion(), Right: rightBuf.ContentVersion()}
 	app.displayedLeft, app.displayedRight = app.snapshots()
@@ -1097,6 +1102,9 @@ func (a *App) draw() {
 	if action.InfoBar != nil && (action.InfoBar.HasMessage || action.InfoBar.HasError) {
 		status = action.InfoBar.Msg + " | " + status
 	}
+	if a.diagnostic != "" && (action.InfoBar == nil || (!action.InfoBar.HasMessage && !action.InfoBar.HasError)) {
+		status = a.diagnostic + " | " + status
+	}
 	if action.InfoBar != nil && action.InfoBar.HasPrompt {
 		status, _ = a.promptDisplay()
 	}
@@ -1105,8 +1113,9 @@ func (a *App) draw() {
 			display.NewStatusLine(p.statusView).Display()
 		}
 		a.renderLine(a.statusRow, status, config.DefStyle)
-		a.renderMenuLine(a.menuRow1, a.shortcutBar(0), a.focusNameIndicator())
-		a.renderMenuLine(a.menuRow2, "^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New Tab", "mdiff (wrapping micro) "+version.Version)
+		menuStyle := microMenuStyle()
+		a.renderMenuLine(a.menuRow1, a.shortcutBar(0), a.focusNameIndicator(), menuStyle)
+		a.renderMenuLine(a.menuRow2, a.shortcutBar(1), "mdiff (wrapping micro) "+version.Version, menuStyle)
 	}
 	cursorX, cursorY, cursorVisible := a.cursorPosition()
 	screen.Screen = terminal
@@ -1150,8 +1159,78 @@ func (a *App) renderLine(y int, text string, style tcell.Style) {
 	}
 }
 
-func (a *App) shortcutBar(_ int) string {
-	return "^W Switch Panes, ^Q Quit, ^S Save, ^O Open, ^G Help, ^E Command Bar, ^K Cut Line"
+func (a *App) shortcutBar(row int) string {
+	items := []struct{ label, action, fallback string }{
+		{"^W Switch Panes", "", ""},
+		{"^Q Quit", "Quit", "^Q"},
+		{"^S Save", "Save", "^S"},
+		{"^O Open", "OpenFile", "^O"},
+		{"^G Help", "ToggleHelp", "^G"},
+		{"^E Command Bar", "CommandMode", "^E"},
+		{"^K Cut Line", "CutLine", "^K"},
+		{"^F Find", "Find", "^F"},
+		{"^Z Undo", "Undo", "^Z"},
+		{"^Y Redo", "Redo", "^Y"},
+		{"^A Select All", "SelectAll", "^A"},
+		{"^D Duplicate Line", "DuplicateLine", "^D"},
+		{"^T New Tab", "AddTab", "^T"},
+	}
+	start, end := 1, len(items)
+	if row == 0 {
+		end = 7
+	} else {
+		start = 7
+	}
+	labels := make([]string, 0, end-start)
+	for _, item := range items[start:end] {
+		key := item.fallback
+		if item.action != "" {
+			if configured := configuredKeyForAction(item.action); configured != "" {
+				key = configured
+			} else if item.action != "Quit" && item.action != "CommandMode" && item.action != "ToggleHelp" {
+				continue
+			}
+		}
+		labels = append(labels, key+item.label[len(item.fallback):])
+	}
+	if row == 0 {
+		labels = append([]string{"^W Switch Panes"}, labels...)
+	}
+	return strings.Join(labels, ", ")
+}
+
+func configuredKeyForAction(want string) string {
+	keys := make([]string, 0, len(config.Bindings["buffer"]))
+	for key := range config.Bindings["buffer"] {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		actionList := config.Bindings["buffer"][key]
+		for _, actionName := range strings.FieldsFunc(actionList, func(r rune) bool { return r == '|' || r == '&' || r == ',' }) {
+			if actionName == want {
+				return displayBindingKey(key)
+			}
+		}
+	}
+	return ""
+}
+
+func displayBindingKey(key string) string {
+	key = strings.Trim(key, "<>")
+	key = strings.ReplaceAll(key, "Ctrl-", "^")
+	key = strings.ReplaceAll(key, "Ctrl", "^")
+	if len(key) == 2 && key[0] == '^' {
+		key = strings.ToUpper(key)
+	}
+	return key
+}
+
+func microMenuStyle() tcell.Style {
+	if style, ok := config.Colorscheme["statusline"]; ok {
+		return style
+	}
+	return config.DefStyle.Reverse(true)
 }
 
 func (a *App) focusNameIndicator() string {
@@ -1161,8 +1240,7 @@ func (a *App) focusNameIndicator() string {
 	return "Left"
 }
 
-func (a *App) renderMenuLine(y int, left, right string) {
-	style := config.DefStyle.Reverse(true)
+func (a *App) renderMenuLine(y int, left, right string, style tcell.Style) {
 	_, height := a.surface.Size()
 	if y < 0 || y >= height {
 		return

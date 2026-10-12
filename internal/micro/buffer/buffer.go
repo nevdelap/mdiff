@@ -489,18 +489,12 @@ func newBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command,
 	// we know the filetype now, so update per-filetype settings
 	config.UpdateFileTypeLocals(b.Settings, b.Settings["filetype"].(string))
 
-	if !b.Type.Scratch {
-		if _, err := os.Stat(filepath.Join(config.ConfigDir, "buffers")); errors.Is(err, fs.ErrNotExist) {
-			os.Mkdir(filepath.Join(config.ConfigDir, "buffers"), os.ModePerm)
-		}
-	}
-
 	if cmd.StartCursor.X != -1 && cmd.StartCursor.Y != -1 {
 		b.StartCursor = cmd.StartCursor
 	} else if !isTransient && (b.Settings["savecursor"].(bool) || b.Settings["saveundo"].(bool)) {
 		err := b.Unserialize()
 		if err != nil {
-			screen.TermMessage(err)
+			config.AddDiagnostic(fmt.Sprint(err))
 		}
 	}
 
@@ -537,7 +531,7 @@ func newBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command,
 
 	err = config.RunPluginFn("onBufferOpen", luar.New(ulua.L, b))
 	if err != nil {
-		screen.TermMessage(err)
+		config.AddDiagnostic(fmt.Sprint(err))
 	}
 
 	OpenBuffers = append(OpenBuffers, b)
@@ -573,7 +567,7 @@ func (b *Buffer) Fini() {
 	if b.Type.Kind == BTTransient.Kind {
 		return
 	}
-	if !b.Modified() {
+	if !config.DisableBufferStateWrites && !b.Modified() {
 		b.Serialize()
 	}
 	b.CancelBackup()
@@ -767,27 +761,27 @@ func (b *Buffer) Size() int {
 func parseDefFromFile(f config.RuntimeFile, header *highlight.Header) *highlight.Def {
 	data, err := f.Data()
 	if err != nil {
-		screen.TermMessage("Error loading syntax file " + f.Name() + ": " + err.Error())
+		config.AddDiagnostic("Error loading syntax file " + f.Name() + ": " + err.Error())
 		return nil
 	}
 
 	if header == nil {
 		header, err = highlight.MakeHeaderYaml(data)
 		if err != nil {
-			screen.TermMessage("Error parsing header for syntax file " + f.Name() + ": " + err.Error())
+			config.AddDiagnostic("Error parsing header for syntax file " + f.Name() + ": " + err.Error())
 			return nil
 		}
 	}
 
 	file, err := highlight.ParseFile(data)
 	if err != nil {
-		screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
+		config.AddDiagnostic("Error parsing syntax file " + f.Name() + ": " + err.Error())
 		return nil
 	}
 
 	syndef, err := highlight.ParseDef(file, header)
 	if err != nil {
-		screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
+		config.AddDiagnostic("Error parsing syntax file " + f.Name() + ": " + err.Error())
 		return nil
 	}
 
@@ -832,13 +826,13 @@ func resolveIncludes(syndef *highlight.Def) {
 	for _, f := range config.ListRuntimeFiles(config.RTSyntax) {
 		data, err := f.Data()
 		if err != nil {
-			screen.TermMessage("Error loading syntax file " + f.Name() + ": " + err.Error())
+			config.AddDiagnostic("Error loading syntax file " + f.Name() + ": " + err.Error())
 			continue
 		}
 
 		header, err := highlight.MakeHeaderYaml(data)
 		if err != nil {
-			screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
+			config.AddDiagnostic("Error parsing syntax file " + f.Name() + ": " + err.Error())
 			continue
 		}
 
@@ -846,7 +840,7 @@ func resolveIncludes(syndef *highlight.Def) {
 			if header.FileType == i {
 				file, err := highlight.ParseFile(data)
 				if err != nil {
-					screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
+					config.AddDiagnostic("Error parsing syntax file " + f.Name() + ": " + err.Error())
 					continue
 				}
 				files = append(files, file)
@@ -902,13 +896,13 @@ func (b *Buffer) UpdateRules() {
 
 		data, err := f.Data()
 		if err != nil {
-			screen.TermMessage("Error loading syntax file " + f.Name() + ": " + err.Error())
+			config.AddDiagnostic("Error loading syntax file " + f.Name() + ": " + err.Error())
 			continue
 		}
 
 		header, err = highlight.MakeHeaderYaml(data)
 		if err != nil {
-			screen.TermMessage("Error parsing header for syntax file " + f.Name() + ": " + err.Error())
+			config.AddDiagnostic("Error parsing header for syntax file " + f.Name() + ": " + err.Error())
 			continue
 		}
 
@@ -930,13 +924,13 @@ func (b *Buffer) UpdateRules() {
 		if matchedFileType || matchedFileName || matchedFileHeader {
 			file, err := highlight.ParseFile(data)
 			if err != nil {
-				screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
+				config.AddDiagnostic("Error parsing syntax file " + f.Name() + ": " + err.Error())
 				continue
 			}
 
 			syndef, err := highlight.ParseDef(file, header)
 			if err != nil {
-				screen.TermMessage("Error parsing syntax file " + f.Name() + ": " + err.Error())
+				config.AddDiagnostic("Error parsing syntax file " + f.Name() + ": " + err.Error())
 				continue
 			}
 
@@ -960,13 +954,13 @@ func (b *Buffer) UpdateRules() {
 		for _, f := range config.ListRuntimeFiles(config.RTSyntaxHeader) {
 			data, err := f.Data()
 			if err != nil {
-				screen.TermMessage("Error loading syntax header file " + f.Name() + ": " + err.Error())
+				config.AddDiagnostic("Error loading syntax header file " + f.Name() + ": " + err.Error())
 				continue
 			}
 
 			header, err = highlight.MakeHeader(data)
 			if err != nil {
-				screen.TermMessage("Error reading syntax header file", f.Name(), err)
+				config.AddDiagnostic(fmt.Sprintf("Error reading syntax header file %s: %v", f.Name(), err))
 				continue
 			}
 

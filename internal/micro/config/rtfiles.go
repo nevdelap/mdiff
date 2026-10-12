@@ -162,6 +162,10 @@ func ListRealRuntimeFiles(fileType RTFiletype) []RuntimeFile {
 // If `user` is false, InitRuntimeFiles ignores the config directory and
 // initializes asset files only.
 func InitRuntimeFiles(user bool) {
+	// Runtime files are process-global. Reinitializing the editor for another
+	// test instance must not append duplicate entries or retain a previous
+	// config directory's overrides.
+	initRuntimeVars()
 	add := func(fileType RTFiletype, dir, pattern string) {
 		if user {
 			AddRuntimeFilesFromDirectory(fileType, filepath.Join(ConfigDir, dir), pattern)

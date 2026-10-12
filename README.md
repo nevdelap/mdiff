@@ -42,6 +42,23 @@ Diff updates use an 80 ms debounce by default. Set
 `--diff-debounce MS` to choose a value from 40 through 180 ms; the command-line
 value takes precedence. Large paste events add 20 ms, up to a 200 ms maximum.
 
+## Micro configuration
+
+mdiff reads Micro's config directory in this order: `--config-dir`,
+`MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`. It reads
+`settings.json`, `bindings.json`, user colorschemes, and syntax definitions
+without creating config files or directories. Supported Micro buffer settings
+apply to both panes, including indentation, wrapping, ruler options, colors, and
+configured filetype. mdiff-owned pane switching, quitting, help, and diff
+navigation keys remain reserved. Unsupported keybinding actions are reported in
+the status area. Lua plugins are not loaded yet.
+
+Malformed settings and an unavailable selected colorscheme stop startup before
+raw terminal mode. Invalid bindings or syntax are reported without rewriting the
+user's files. Explicit document saves and configured Micro backup/autosave
+options can still write document artifacts. See the observed support matrix in
+[`design_docs/micro_diff_editor.md`](design_docs/micro_diff_editor.md).
+
 ## Development
 
 See [docs/development.md](docs/development.md) for setup, formatting, linting,

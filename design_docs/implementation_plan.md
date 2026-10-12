@@ -788,7 +788,7 @@ Implementation handoff:
 
 ### TASK-006 - Load Micro configuration safely
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -865,7 +865,8 @@ Acceptance criteria:
   terminal raw mode.
 - Shortcut-bar tests prove labels follow user remaps and omit removed or
   reserved actions. TASK-011 adds Open/Save hints and tests their active-pane
-  behavior; New Tab remains unsupported.
+  behavior; the existing `Ctrl+T` action replaces the focused document to keep
+  the two-pane limit.
 - Color rendering tests verify the shortcut bar uses the active Micro
   colorscheme's status bar foreground and background, with the documented
   fallback when those styles are unavailable.
@@ -887,9 +888,23 @@ Verification:
 
 Handoff:
 
-- Record configuration search paths, precedence, read-only guarantees, fixture
-  coverage, supported settings/actions, and explicit syntax/color/keybinding
-  limitations.
+- Configuration lookup follows `--config-dir`, `MICRO_CONFIG_HOME`,
+  `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime assets override
+  embedded assets by name. The command-line debounce overrides
+  `mdiff.diff-debounce-ms` in `settings.json`.
+- Startup does not create the Micro config directory or write source config,
+  settings defaults, or buffer-state files. Explicit document saves and
+  configured backups/autosave remain enabled.
+- Both panes receive Micro's parsed options and synthetic filetype settings.
+  Configured bindings are loaded with mdiff lifecycle controls reserved;
+  unsupported bindings and malformed syntax are reported without blocking
+  startup. Shortcut labels follow supported remaps and the menu uses the active
+  colorscheme's statusline style.
+- Tests cover valid, missing, and malformed configuration, unchanged user files,
+  synthetic syntax selection, remapped/removed bindings, color fallback,
+  configured backup behavior, and the existing autosave quit behavior.
+- Verified: `just format`, `just lint`, `just test`, `just test-pty`, and
+  `just build` pass.
 
 ### TASK-007 - Complete Micro plugin compatibility within the two-pane model
 

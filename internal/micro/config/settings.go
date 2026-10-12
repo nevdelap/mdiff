@@ -174,7 +174,11 @@ func validateParsedSettings() error {
 	var err error
 	defaults := DefaultAllSettings()
 	for k, v := range parsedSettings {
-		if strings.HasPrefix(reflect.TypeOf(v).String(), "map") {
+		valueType := reflect.TypeOf(v)
+		if valueType == nil {
+			return fmt.Errorf("Error: setting '%s' has null value", k)
+		}
+		if strings.HasPrefix(valueType.String(), "map") {
 			if strings.HasPrefix(k, "ft:") {
 				for k1, v1 := range v.(map[string]any) {
 					if _, ok := defaults[k1]; ok {

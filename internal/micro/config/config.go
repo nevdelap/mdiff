@@ -10,6 +10,17 @@ import (
 
 var ConfigDir string
 
+// DisableBufferStateWrites is enabled by mdiff to keep Micro's optional
+// cursor/undo state serialization from writing into the user's config tree.
+var DisableBufferStateWrites bool
+
+// Diagnostics contains non-fatal configuration issues collected during
+// startup. mdiff surfaces these in its status area instead of using Micro's
+// blocking pre-screen prompt, which would be unsafe during CLI startup.
+var Diagnostics []string
+
+func AddDiagnostic(message string) { Diagnostics = append(Diagnostics, message) }
+
 // InitConfigDir finds the configuration directory for micro according to the XDG spec.
 // If no directory is found, it creates one.
 func InitConfigDir(flagConfigDir string) error {

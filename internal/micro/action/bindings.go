@@ -36,6 +36,7 @@ func createBindingsIfNotExist(fname string) {
 
 // InitBindings intializes the bindings map by reading from bindings.json
 func InitBindings() {
+	config.Diagnostics = nil
 	BufBindings = NewKeyTree()
 	RejectedBufferBindings = make(map[string]string)
 	InfoBindings = NewKeyTree()
@@ -50,13 +51,14 @@ func InitBindings() {
 	if _, e := os.Stat(filename); e == nil {
 		input, err := os.ReadFile(filename)
 		if err != nil {
-			screen.TermMessage("Error reading bindings.json file: " + err.Error())
+			config.AddDiagnostic("Error reading bindings.json file: " + err.Error())
 			return
 		}
 
 		err = json5.Unmarshal(input, &parsed)
 		if err != nil {
-			screen.TermMessage("Error reading bindings.json:", err.Error())
+			config.AddDiagnostic("Error reading bindings.json: " + err.Error())
+			parsed = nil
 		}
 	}
 
@@ -75,19 +77,19 @@ func InitBindings() {
 		case map[string]any:
 			bind, ok := Binder[k]
 			if !ok || bind == nil {
-				screen.TermMessage(fmt.Sprintf("%s is not a valid pane type", k))
+				config.AddDiagnostic(fmt.Sprintf("%s is not a valid pane type", k))
 				continue
 			}
 			for e, a := range val {
 				s, ok := a.(string)
 				if !ok {
-					screen.TermMessage("Error reading bindings.json: non-string and non-map entry", k)
+					config.AddDiagnostic(fmt.Sprintf("Error reading bindings.json: non-string and non-map entry: %s", k))
 				} else {
 					BindKey(e, s, bind)
 				}
 			}
 		default:
-			screen.TermMessage("Error reading bindings.json: non-string and non-map entry", k)
+			config.AddDiagnostic(fmt.Sprintf("Error reading bindings.json: non-string and non-map entry: %s", k))
 		}
 	}
 }
@@ -95,7 +97,7 @@ func InitBindings() {
 func BindKey(k, v string, bind func(e Event, a string)) {
 	event, err := findEvent(k)
 	if err != nil {
-		screen.TermMessage(err)
+		config.AddDiagnostic(fmt.Sprint(err))
 		return
 	}
 
