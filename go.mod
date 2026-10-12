@@ -2,6 +2,7 @@ module github.com/nevdelap/mdiff
 
 require (
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/creack/pty v1.1.18
 	github.com/dustin/go-humanize v1.0.0
 	github.com/kballard/go-shellquote v0.0.0-20180428030007-95032a82bc51
 	github.com/mattn/go-runewidth v0.0.16
@@ -15,12 +16,11 @@ require (
 	github.com/zyedidia/clipper v0.1.1
 	github.com/zyedidia/glob v0.0.0-20170209203856-dd4023a66dc3
 	golang.org/x/text v0.4.0
-	gopkg.in/yaml.v2 v2.2.8
+	gopkg.in/yaml.v2 v2.4.0
 	layeh.com/gopher-luar v1.0.11
 )
 
 require (
-	github.com/creack/pty v1.1.18 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/gdamore/encoding v1.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.0.3 // indirect
