@@ -261,6 +261,9 @@ type BufPane struct {
 
 	// Buf is the buffer this BufPane views
 	Buf *buffer.Buffer
+	// PromptBufferName optionally supplies an application-specific buffer label
+	// for Micro's save-before-close prompt.
+	PromptBufferName func() string
 	// Bindings stores the association of key events and actions
 	bindings *KeyTree
 

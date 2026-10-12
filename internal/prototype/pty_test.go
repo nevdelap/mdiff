@@ -44,6 +44,13 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	transcript.waitForCursorInColumnSince(t, focusRightStart, 22, 42)
 	writePTY(t, terminal, []byte("\x1b[200~"+right+"\x1b[201~"))
 	transcript.waitFor(t, []byte("R23"))
+	if transcript.mouseModeRequested() {
+		mouseStart := transcript.mark()
+		writePTY(t, terminal, []byte{0x1b, '[', 'M', 96, 55, 34}) // X11 wheel-up over the right pane.
+		transcript.waitForScreenSince(t, mouseStart, "L19")
+	} else {
+		t.Log("PTY terminfo did not enable mouse reporting; simulation tests cover wheel routing")
+	}
 
 	// Scroll upward from the left pane until the first left line is visible.
 	focusLeftStart := transcript.mark()
@@ -80,10 +87,10 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 
 	quitStart := transcript.mark()
 	writePTY(t, terminal, []byte{0x11}) // Ctrl-Q prompts for each modified unnamed buffer.
-	transcript.waitForScreenSince(t, quitStart, "No name")
+	transcript.waitForScreenSince(t, quitStart, "left pane (No name)")
 	writePTY(t, terminal, []byte{'n'})
 	secondQuitPrompt := transcript.mark()
-	transcript.waitForScreenSince(t, secondQuitPrompt, "No name")
+	transcript.waitForScreenSince(t, secondQuitPrompt, "right pane (No name)")
 	writePTY(t, terminal, []byte{'n'}) // Discard both and exit.
 	waitProcess(t, cmd)
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
@@ -275,11 +282,11 @@ func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
 	transcript.waitFor(t, []byte("^Q Quit"))
 	writePTY(t, terminal, []byte("\x1b[200~UNNAMED-EDIT\n\x1b[201~"))
 	writePTY(t, terminal, []byte{0x11}) // Ctrl+Q asks about the unnamed buffer.
-	transcript.waitForScreenSince(t, 0, "Save changes to No name")
+	transcript.waitForScreenSince(t, 0, "Save changes to left pane (No name)")
 	writePTY(t, terminal, []byte{0x11}) // Micro's command prompt binding cancels.
 	secondPrompt := transcript.mark()
 	writePTY(t, terminal, []byte{0x11})
-	transcript.waitForScreenSince(t, secondPrompt, "Save changes to No name")
+	transcript.waitForScreenSince(t, secondPrompt, "Save changes to left pane (No name)")
 	writePTY(t, terminal, []byte{'y'})
 	transcript.waitForScreenSince(t, 0, "Filename:")
 	writePTY(t, terminal, []byte(savePath))
@@ -342,6 +349,12 @@ func (p *ptyTranscript) mark() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.data)
+}
+
+func (p *ptyTranscript) mouseModeRequested() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return bytes.Contains(p.data, []byte("?1000h")) || bytes.Contains(p.data, []byte("?1002h")) || bytes.Contains(p.data, []byte("?1006h"))
 }
 
 func (p *ptyTranscript) waitFor(t *testing.T, marker []byte) []byte {

@@ -45,6 +45,7 @@ type Delta struct {
 func (eh *EventHandler) DoTextEvent(t *TextEvent, useUndo bool) {
 	oldl := eh.buf.LinesNum()
 	insertedBytes, insertedNewlines := insertedTextStats(t)
+	ranges := textChangeRanges(t)
 
 	if useUndo {
 		if !eh.Execute(t) {
@@ -52,7 +53,7 @@ func (eh *EventHandler) DoTextEvent(t *TextEvent, useUndo bool) {
 		}
 	} else {
 		ExecuteTextEvent(t, eh.buf)
-		eh.notifyChange(insertedBytes, insertedNewlines)
+		eh.notifyChange(insertedBytes, insertedNewlines, ranges)
 	}
 
 	if len(t.Deltas) != 1 {
@@ -166,6 +167,16 @@ type TextChange struct {
 	Version          uint64
 	InsertedBytes    int
 	InsertedNewlines int
+	Ranges           []TextChangeRange
+}
+
+// TextChangeRange records the old logical-line range touched by one delta and
+// the net number of logical lines inserted by that delta.
+type TextChangeRange struct {
+	StartLine int
+	EndLine   int
+	StartX    int
+	LineDelta int
 }
 
 // SetChangeHandler installs the owner notification for successful text edits.
@@ -188,8 +199,33 @@ func insertedTextStats(t *TextEvent) (int, int) {
 	return totalBytes, newlines
 }
 
-func (eh *EventHandler) notifyChange(insertedBytes, insertedNewlines int) {
-	change := TextChange{Version: eh.ContentVersion(), InsertedBytes: insertedBytes, InsertedNewlines: insertedNewlines}
+func textChangeRanges(t *TextEvent) []TextChangeRange {
+	ranges := make([]TextChangeRange, 0, len(t.Deltas))
+	for _, delta := range t.Deltas {
+		lineDelta := 0
+		switch t.EventType {
+		case TextEventInsert:
+			lineDelta = bytes.Count(delta.Text, []byte{'\n'})
+		case TextEventRemove:
+			lineDelta = delta.Start.Y - delta.End.Y
+		case TextEventReplace:
+			lineDelta = bytes.Count(delta.Text, []byte{'\n'}) + delta.Start.Y - delta.End.Y
+		}
+		ranges = append(ranges, TextChangeRange{
+			StartLine: delta.Start.Y,
+			EndLine:   delta.End.Y,
+			StartX:    delta.Start.X,
+			LineDelta: lineDelta,
+		})
+	}
+	return ranges
+}
+
+func (eh *EventHandler) notifyChange(insertedBytes, insertedNewlines int, ranges []TextChangeRange) {
+	change := TextChange{
+		Version: eh.ContentVersion(), InsertedBytes: insertedBytes,
+		InsertedNewlines: insertedNewlines, Ranges: ranges,
+	}
 	if eh.onChange != nil {
 		eh.onChange(change)
 	}
@@ -281,7 +317,6 @@ func (eh *EventHandler) Replace(start, end Loc, replace string) {
 
 // Execute a textevent and add it to the undo stack
 func (eh *EventHandler) Execute(t *TextEvent) bool {
-	insertedBytes, insertedNewlines := insertedTextStats(t)
 	if eh.RedoStack.Len() > 0 {
 		eh.RedoStack = new(TEStack)
 	}
@@ -296,8 +331,10 @@ func (eh *EventHandler) Execute(t *TextEvent) bool {
 		return false
 	}
 
+	insertedBytes, insertedNewlines := insertedTextStats(t)
+	ranges := textChangeRanges(t)
 	ExecuteTextEvent(t, eh.buf)
-	eh.notifyChange(insertedBytes, insertedNewlines)
+	eh.notifyChange(insertedBytes, insertedNewlines, ranges)
 	return true
 }
 

@@ -13,8 +13,11 @@ func TestTextChangeVersionsCoverEditUndoRedo(t *testing.T) {
 	right.SetChangeHandler(func(change TextChange) { rightChanges = append(rightChanges, change) })
 
 	left.Insert(Loc{X: 0, Y: 0}, "alpha\nbeta")
-	if len(leftChanges) != 1 || leftChanges[0] != (TextChange{Version: 1, InsertedBytes: 10, InsertedNewlines: 1}) {
+	if len(leftChanges) != 1 || leftChanges[0].Version != 1 || leftChanges[0].InsertedBytes != 10 || leftChanges[0].InsertedNewlines != 1 {
 		t.Fatalf("insert notification = %#v", leftChanges)
+	}
+	if len(leftChanges[0].Ranges) != 1 || leftChanges[0].Ranges[0] != (TextChangeRange{StartLine: 0, EndLine: 0, StartX: 0, LineDelta: 1}) {
+		t.Fatalf("insert ranges = %#v", leftChanges[0].Ranges)
 	}
 	if right.ContentVersion() != 0 || len(rightChanges) != 0 {
 		t.Fatalf("independent buffer changed: version=%d changes=%#v", right.ContentVersion(), rightChanges)

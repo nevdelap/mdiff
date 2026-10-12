@@ -1974,7 +1974,11 @@ func (h *BufPane) ForceQuit() bool {
 // closePrompt displays a prompt to save the buffer before closing it to proceed
 // with a different action or command
 func (h *BufPane) closePrompt(action string, callback func()) {
-	InfoBar.YNPrompt("Save changes to "+h.Buf.GetName()+" before closing? (y,n,esc)", func(yes, canceled bool) {
+	name := h.Buf.GetName()
+	if h.PromptBufferName != nil {
+		name = h.PromptBufferName()
+	}
+	InfoBar.YNPrompt("Save changes to "+name+" before closing? (y,n,esc)", func(yes, canceled bool) {
 		if !canceled && !yes {
 			callback()
 		} else if !canceled && yes {

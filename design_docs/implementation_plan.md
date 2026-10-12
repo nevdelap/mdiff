@@ -484,13 +484,13 @@ Handoff:
   immediately. A regression test verifies that when `v2` is pending and a new
   edit creates `v3`, the obsolete active result triggers a fresh `v3` capture
   and `v2` never starts.
-- The last valid alignment remains visible with a `Diff updating…` footer while
-  work is pending. Its immutable displayed snapshots keep viewport anchors tied
-  to the visual map even if edits shift live line numbers. A matching result
-  swaps the pairs, displayed snapshots, anchor mapping, and expanded layout on
-  the event-loop goroutine. Errors retain the last map and show a footer error.
-  Shutdown stops the timer and joins the running finite comparison before
-  closing Micro buffers and restoring the terminal.
+- The last valid alignment remains visible without a transient updating footer
+  while work is pending. Its immutable displayed snapshots keep viewport anchors
+  tied to the visual map even if edits shift live line numbers. A matching
+  result swaps the pairs, displayed snapshots, anchor mapping, and expanded
+  layout on the event-loop goroutine. Errors retain the last map and show a
+  footer error. Shutdown stops the timer and joins the running finite comparison
+  before closing Micro buffers and restoring the terminal.
 - `just test-race` initially exposed races in Micro's asynchronous syntax path.
   Syntax workers now compute against detached line snapshots and publish state
   only if the captured buffer version and highlighter still match. The shared
@@ -996,7 +996,7 @@ Handoff:
 
 ### TASK-008 - Harden shared viewport and terminal interaction
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -1043,7 +1043,8 @@ Acceptance criteria:
 - Simulation tests cover cursor movement and selections through insertions,
   deletions, replacements, spacer clicks, both scroll directions from both
   panes, diff jumps, softwrap on/off, unequal widths, and repeated-line anchor
-  ambiguity.
+  ambiguity, including identical repeated blocks with identical three-line
+  context when one copy is inserted above the anchored copy.
 - Resize and edits above/at/below the viewport preserve the specified anchor,
   keep the focused cursor visible, and produce no paired-line drift or one-frame
   mismatch between panes.
@@ -1055,16 +1056,67 @@ Acceptance criteria:
 
 Verification:
 
-- `just format`
-- `just lint`
-- `just test`
-- `just test-pty`
-- `just build`
+- Passed on Linux: `just format`, `just lint`, `just test`, `just test-pty`, and
+  `just build`.
+- Property generator: `testing/quick`, deterministic seed `20261013`, 500 cases;
+  duplicate line identities and wrap heights from 1 through 4 are included.
+- Repeated-block regression: an inserted copy has matching three-line context;
+  the viewport follows the original selected occurrence through the buffer's
+  text-change range and remains anchored after rebuilding the alignment.
+- PTY coverage used `xterm-256color`: focus switching, keyboard scroll from
+  either pane, X11 wheel-up over the right pane, resize, quit, interrupt, and
+  alternate-screen restoration. If terminfo does not enable mouse reporting, the
+  PTY case logs the fallback and simulation tests exercise wheel routing.
+- macOS CI was not run locally; it remains covered by the repository workflow.
 
 Handoff:
 
-- Record the final scroll/cursor rules, property generators and seeds, tested
-  terminal capabilities, and any behavior that remains terminal-dependent.
+- `App.top` is the sole vertical scroll coordinate: an index into the expanded
+  `viewport.Layout.Rows`, where each row represents one aligned visual row,
+  including unmatched-line spacers and wrap continuation rows. Wheel and
+  Ctrl-Up/Down from either pane change this shared index; horizontal `StartCol`
+  remains pane-local and is reset when softwrap is enabled.
+- Each logical line has an indexed aligned-row start and a wrap height. A
+  logical line/subrow converts to a shared visual row only for real subrows;
+  out-of-range subrows and spacer cells are invalid. Clicking a spacer focuses
+  the pane and selects its nearest real row (ties go to the preceding row,
+  except a spacer before the first real row goes forward). Diff navigation
+  targets the next or previous distinct hunk without wrapping around.
+- Before rebuilding layout, the viewport captures the top row's side, line text,
+  wrap subrow, nearby line context, and occurrence position. Pending text-change
+  ranges transform the anchor's logical line through edits; the updated snapshot
+  then refreshes its occurrence. Restoration ranks exact text and neighboring
+  context, then occurrence distance, then numeric line distance. This preserves
+  the selected repeated block when an identical block is inserted above it. The
+  old subrow is clamped to the new wrap height. Cursor visibility is then
+  restored against the shared coordinate, while Micro's `Relocate` keeps
+  horizontal cursor visibility in the focused pane. The terminal cursor x starts
+  at `BufView().X` (after Micro's active gutter), adds content-relative visual
+  x, and subtracts pane-local `StartCol` only when softwrap is off.
+- Resizing, gutter changes, tab-size changes, and wrap-option changes trigger a
+  layout rebuild. Softwrap uses the current pane width and wrap settings;
+  non-wrapped panes retain independent horizontal offsets. When the terminal is
+  below the preferred minimum, the logical pane geometry stays clamped and the
+  display clips to the available terminal bounds.
+- Verified terminal mouse behavior is terminfo-dependent. The PTY test checks
+  wheel scrolling when mouse mode is requested and records the simulation
+  fallback otherwise; the generated viewport tests and simulation tests cover
+  spacer mapping, wheel routing from both sides, anchor ambiguity, and
+  wrap-height inverses.
+- The repeated-block regression inserts an identical seven-line block above a
+  viewport anchor whose three lines of before/after context are also identical.
+  The buffer event reports changed logical-line ranges so the pending anchor
+  follows its original line, and occurrence-aware restoration selects the
+  original block after the snapshot changes.
+- Save-before-close prompts identify both the pane side and Micro buffer name,
+  including `left pane (No name)` and `right pane (No name)` for unnamed
+  documents. The same label callback is used by mdiff's staged quit prompts and
+  Micro's Open-over-dirty-buffer prompt.
+- Bottom rows follow Micro's order: the paired pane status lines, the two-row
+  key menu, then the InfoBar at the terminal bottom. The key menu uses Micro's
+  `message` colorscheme style and default-style fallback. The InfoBar stays
+  blank when idle and shows actual prompts, transient messages, and errors
+  there.
 
 ### TASK-009 - Meet large-input performance and resource targets
 

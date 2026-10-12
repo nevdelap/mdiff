@@ -13,6 +13,34 @@ import (
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
+func TestTerminalCursorIncludesMicroGutterOffset(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 10)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "abcdef")
+	app.left.h.GotoLoc(buffer.Loc{X: 3, Y: 0})
+	app.expandWithAnchor(anchor{}, []string{"abcdef"}, []string{""})
+	visual := app.left.view.VLocFromLoc(app.left.h.Cursor.Loc)
+	wantX := app.left.view.BufView().X + visual.VisualX - app.left.view.StartCol
+	if app.left.view.BufView().X <= app.left.x {
+		t.Fatalf("test pane has no Micro gutter: pane x=%d content x=%d", app.left.x, app.left.view.BufView().X)
+	}
+	gotX, _, visible := app.cursorPosition()
+	if !visible || gotX != wantX {
+		t.Fatalf("cursor x=%d visible=%t, want content coordinate %d including gutter", gotX, visible, wantX)
+	}
+
+	if err := app.left.buf.SetOptionNative("softwrap", true); err != nil {
+		t.Fatal(err)
+	}
+	app.refreshLayoutIfNeeded()
+	visual = app.left.view.VLocFromLoc(app.left.h.Cursor.Loc)
+	wantX = app.left.view.BufView().X + visual.VisualX
+	gotX, _, visible = app.cursorPosition()
+	if !visible || gotX != wantX {
+		t.Fatalf("softwrapped cursor x=%d visible=%t, want content coordinate %d including gutter", gotX, visible, wantX)
+	}
+}
+
 func TestMicroEditingActionsRemainPaneLocalAndUndoable(t *testing.T) {
 	oldMethod := clipboard.CurrentMethod
 	clipboard.CurrentMethod = clipboard.Internal
@@ -183,14 +211,27 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.1") {
 		t.Fatalf("right-aligned menu indicators missing: row1=%q row2=%q", row1, row2)
 	}
+	app.handle(key(tcell.KeyCtrlW, 0, tcell.ModCtrl))
+	app.draw()
+	if row := strings.TrimRight(screenLine(sim, app.menuRow1, app.cols), " "); !strings.HasSuffix(row, "Right") {
+		t.Fatalf("right pane focus indicator is not at the end of the shortcut row: %q", row)
+	}
+	if row := strings.TrimSpace(screenLine(sim, app.statusRow, app.cols)); row == "Left" || row == "Right" {
+		t.Fatalf("right pane focus indicator is duplicated on the status row: %q", row)
+	}
+	app.handle(key(tcell.KeyCtrlW, 0, tcell.ModCtrl))
+	app.draw()
 	status := screenLine(sim, app.statusRow, app.cols)
+	if strings.TrimSpace(status) == "Left" || strings.TrimSpace(status) == "Right" {
+		t.Fatalf("focus indicator is duplicated on the status row: %q", status)
+	}
 	for _, legend := range []string{"F6 switch", "Ctrl-Up/Down", "Alt-Up/Down differences"} {
 		if strings.Contains(status, legend) {
 			t.Errorf("status row retains permanent control legend %q: %q", legend, status)
 		}
 	}
-	if app.statusRow <= app.rows || app.menuRow1 != app.statusRow+1 || app.menuRow2 != app.menuRow1+1 {
-		t.Fatalf("editor, status, and menu rows overlap: content=%d status=%d menu=(%d,%d)", app.rows, app.statusRow, app.menuRow1, app.menuRow2)
+	if app.menuRow1 != app.rows+1 || app.menuRow2 != app.menuRow1+1 || app.statusRow != app.menuRow2+1 {
+		t.Fatalf("Micro bottom-row order changed: content=%d menu=(%d,%d) infobar=%d", app.rows, app.menuRow1, app.menuRow2, app.statusRow)
 	}
 	leftStatus := screenLine(sim, app.left.statusView.Y, app.left.width)
 	rightStatus := screenLine(sim, app.right.statusView.Y, app.right.width)

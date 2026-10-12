@@ -67,13 +67,17 @@ func TestMicroSettingsApplyToBothPanesAndRemainReadOnly(t *testing.T) {
 	if labels := app.shortcutBar(1); !strings.Contains(labels, "^U Undo") {
 		t.Fatalf("remapped undo shortcut missing: %q", labels)
 	}
-	if got := microMenuStyle(); got != config.Colorscheme["statusline"] {
-		t.Fatal("key menu does not use the active Micro statusline colors")
+	wantMenuStyle, ok := config.Colorscheme["message"]
+	if !ok {
+		wantMenuStyle = config.DefStyle
+	}
+	if got := microMenuStyle(); got != wantMenuStyle {
+		t.Fatal("key menu does not use Micro's InfoBar message colors")
 	}
 	app.draw()
 	_, _, renderedStyle, _ := sim.GetContent(0, app.menuRow1)
-	if renderedStyle != config.Colorscheme["statusline"] {
-		t.Fatal("rendered shortcut row does not use the Micro statusline colors")
+	if renderedStyle != wantMenuStyle {
+		t.Fatal("rendered shortcut row does not use Micro's InfoBar message colors")
 	}
 	app.handle(tcell.NewEventPaste("edited in memory", ""))
 	app.Close()
@@ -152,7 +156,7 @@ func TestMissingColorschemeFailsAndRestoresTerminal(t *testing.T) {
 	}
 }
 
-func TestShortcutMenuFallsBackWhenColorschemeHasNoStatusline(t *testing.T) {
+func TestShortcutMenuFallsBackWhenColorschemeHasNoMessageStyle(t *testing.T) {
 	configDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(configDir, "colorschemes"), 0o700); err != nil {
 		t.Fatal(err)
@@ -173,7 +177,7 @@ func TestShortcutMenuFallsBackWhenColorschemeHasNoStatusline(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Close()
-	if got, want := microMenuStyle(), config.DefStyle.Reverse(true); got != want {
+	if got, want := microMenuStyle(), config.DefStyle; got != want {
 		t.Fatalf("menu fallback style = %v, want %v", got, want)
 	}
 }

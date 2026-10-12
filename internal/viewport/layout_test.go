@@ -1,8 +1,11 @@
 package viewport
 
 import (
+	"fmt"
+	"math/rand"
 	"reflect"
 	"testing"
+	"testing/quick"
 
 	"github.com/nevdelap/mdiff/internal/compare"
 )
@@ -65,6 +68,75 @@ func TestCursorRowAndLineMappingUseSharedCoordinates(t *testing.T) {
 	if got := layout.CursorRow(Left, 0, 1); got != 1 {
 		t.Fatalf("wrapped cursor maps to %d, want 1", got)
 	}
+	if got := layout.WrapHeight(Left, 0); got != 2 {
+		t.Fatalf("left wrap height = %d, want 2", got)
+	}
+	if got := layout.CursorRow(Left, 0, 2); got != -1 {
+		t.Fatalf("invalid wrap subrow maps to %d, want -1", got)
+	}
+}
+
+func TestLogicalAndVisualCoordinatesAreInverseForGeneratedLayouts(t *testing.T) {
+	property := func(leftSeed, rightSeed int64) bool {
+		left := generatedLines(leftSeed)
+		right := generatedLines(rightSeed)
+		pairs := compare.Align(left, right)
+		layout := Expand(pairs, func(line int) int { return generatedHeight(leftSeed, line) }, func(line int) int { return generatedHeight(rightSeed, line) })
+		for _, side := range []Side{Left, Right} {
+			lines := left
+			if side == Right {
+				lines = right
+			}
+			lastStart := -1
+			for line := range lines {
+				start := layout.RowFor(side, line)
+				if start < 0 || start <= lastStart || layout.WrapHeight(side, line) < 1 {
+					return false
+				}
+				lastStart = start
+				for subrow := 0; subrow < layout.WrapHeight(side, line); subrow++ {
+					visual := layout.CursorRow(side, line, subrow)
+					cell := layout.CellAt(side, visual)
+					if visual != start+subrow || cell.Line != line || cell.WrapRow != subrow || cell.Spacer || cell.Continuation {
+						return false
+					}
+				}
+				if layout.CursorRow(side, line, layout.WrapHeight(side, line)) != -1 {
+					return false
+				}
+			}
+		}
+		for visual := range layout.Rows {
+			for _, side := range []Side{Left, Right} {
+				cell := layout.CellAt(side, visual)
+				if cell.Line < 0 || cell.Spacer || cell.Continuation {
+					continue
+				}
+				if layout.CursorRow(side, cell.Line, cell.WrapRow) != visual {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	if err := quick.Check(property, &quick.Config{MaxCount: 500, Rand: rand.New(rand.NewSource(20261013))}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func generatedLines(seed int64) []string {
+	count := 1 + int(uint64(seed)>>60)%12
+	lines := make([]string, count)
+	state := uint64(seed)
+	for i := range lines {
+		state = state*6364136223846793005 + 1442695040888963407
+		lines[i] = fmt.Sprintf("line-%d", (state>>32)%7)
+	}
+	return lines
+}
+
+func generatedHeight(seed int64, line int) int {
+	return 1 + int((uint64(seed)+uint64(line)*17)%4)
 }
 
 func TestExpandProjectionPreservesLogicalSourceOrder(t *testing.T) {

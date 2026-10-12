@@ -77,6 +77,27 @@ func TestQuitStagesBothPaneDecisionsBeforeSaving(t *testing.T) {
 	}
 }
 
+func TestQuitNamesEachUnnamedPaneInItsSavePrompt(t *testing.T) {
+	app := newWorkflowApp(t)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "left edits")
+	app.right.buf.Insert(buffer.Loc{X: 0, Y: 0}, "right edits")
+
+	if app.handle(key(tcell.KeyCtrlQ, 0, tcell.ModCtrl)) {
+		t.Fatal("quit completed before asking about modified panes")
+	}
+	if got := app.currentStatus(); !strings.Contains(got, "left pane (No name)") {
+		t.Fatalf("first prompt does not identify the left pane: %q", got)
+	}
+	app.handle(key(tcell.KeyRune, 'n', tcell.ModNone))
+	if got := app.currentStatus(); !strings.Contains(got, "right pane (No name)") {
+		t.Fatalf("second prompt does not identify the right pane: %q", got)
+	}
+	if !app.handle(key(tcell.KeyRune, 'n', tcell.ModNone)) || !app.quitComplete {
+		t.Fatal("discarding both unnamed panes did not complete quit")
+	}
+}
+
 func TestQuitSavesOrDiscardsBothModifiedPanes(t *testing.T) {
 	for _, tc := range []struct {
 		name        string

@@ -35,6 +35,18 @@ type pane struct {
 	width      int
 }
 
+type paneLayoutKey struct {
+	width    int
+	buffer   int
+	softwrap bool
+	wordwrap bool
+	tabsize  int
+}
+
+type appLayoutKey struct {
+	left, right paneLayoutKey
+}
+
 type quitFlow struct {
 	panes        []*pane
 	paneIndex    int
@@ -45,34 +57,37 @@ type quitFlow struct {
 
 // App owns the two Micro buffers, panes, alignment, and shared viewport.
 type App struct {
-	left, right     pane
-	layout          viewport.Layout
-	terminal        tcell.Screen
-	surface         tcell.SimulationScreen
-	paintScreen     tcell.SimulationScreen
-	top             int
-	rows            int
-	cols            int
-	statusRow       int
-	menuRow1        int
-	menuRow2        int
-	focus           viewport.Side
-	closed          bool
-	coordinator     *diffCoordinator
-	versions        DiffVersions
-	layoutVersions  DiffVersions
-	pairs           []compare.Pair
-	displayedLeft   []string
-	displayedRight  []string
-	diffErr         error
-	handlingPaste   bool
-	blockedSequence string
-	quitFlow        *quitFlow
-	quitComplete    bool
-	diagnostic      string
-	microTab        *action.Tab
-	pluginTimers    chan func()
-	pluginStop      chan struct{}
+	left, right      pane
+	layout           viewport.Layout
+	layoutKey        appLayoutKey
+	terminal         tcell.Screen
+	surface          tcell.SimulationScreen
+	paintScreen      tcell.SimulationScreen
+	top              int
+	rows             int
+	cols             int
+	statusRow        int
+	menuRow1         int
+	menuRow2         int
+	focus            viewport.Side
+	closed           bool
+	coordinator      *diffCoordinator
+	versions         DiffVersions
+	layoutVersions   DiffVersions
+	pairs            []compare.Pair
+	displayedLeft    []string
+	displayedRight   []string
+	pendingAnchor    anchor
+	hasPendingAnchor bool
+	diffErr          error
+	handlingPaste    bool
+	blockedSequence  string
+	quitFlow         *quitFlow
+	quitComplete     bool
+	diagnostic       string
+	microTab         *action.Tab
+	pluginTimers     chan func()
+	pluginStop       chan struct{}
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
@@ -252,6 +267,13 @@ func resolveDebounce(settings map[string]any, cliMS *int) (time.Duration, error)
 }
 
 func (a *App) textChanged(side viewport.Side, change buffer.TextChange) {
+	if !a.hasPendingAnchor {
+		a.pendingAnchor = a.captureAnchor()
+		a.hasPendingAnchor = a.pendingAnchor.valid
+	}
+	if a.hasPendingAnchor && a.pendingAnchor.side == side {
+		a.pendingAnchor.line = transformAnchorLine(a.pendingAnchor.line, change.Ranges)
+	}
 	if side == viewport.Left {
 		a.versions.Left = change.Version
 	} else {
@@ -262,6 +284,27 @@ func (a *App) textChanged(side viewport.Side, change buffer.TextChange) {
 		pasteBytes, pasteNewlines = change.InsertedBytes, change.InsertedNewlines
 	}
 	a.coordinator.MarkDirty(a.versions, pasteBytes, pasteNewlines)
+}
+
+func transformAnchorLine(line int, ranges []buffer.TextChangeRange) int {
+	ordered := append([]buffer.TextChangeRange(nil), ranges...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].StartLine < ordered[j].StartLine
+	})
+	shift := 0
+	for _, change := range ordered {
+		if change.EndLine < line || (change.EndLine == line && change.StartLine < line) {
+			shift += change.LineDelta
+			continue
+		}
+		if change.StartLine < line && change.EndLine >= line {
+			return max(0, change.StartLine+shift)
+		}
+		if change.StartLine == line && change.EndLine == line && change.StartX == 0 && change.LineDelta > 0 {
+			shift += change.LineDelta
+		}
+	}
+	return max(0, line+shift)
 }
 
 func (a *App) isDiffStale() bool {
@@ -281,11 +324,13 @@ func (a *App) installDiff(result diffResult) {
 		a.diffErr = completed.err
 		return
 	}
-	anchor := a.captureAnchor()
+	currentAnchor := a.captureAnchorForSnapshot(completed.snapshot.left, completed.snapshot.right)
 	a.pairs = completed.pairs
 	a.displayedLeft = append([]string(nil), completed.snapshot.left...)
 	a.displayedRight = append([]string(nil), completed.snapshot.right...)
-	a.expandWithAnchor(anchor, completed.snapshot.left, completed.snapshot.right)
+	a.expandWithAnchor(currentAnchor, completed.snapshot.left, completed.snapshot.right)
+	a.hasPendingAnchor = false
+	a.pendingAnchor = anchor{}
 	a.layoutVersions = completed.snapshot.versions
 	a.diffErr = nil
 }
@@ -423,15 +468,15 @@ func (a *App) resize(cols, rows int) {
 	anchor := a.captureAnchor()
 	a.cols = cols
 	// Keep four dedicated bottom rows when the terminal can display them:
-	// one Micro status line per pane, one shared transient status row, and the
-	// two-row Micro key menu. Compact terminals retain an editor row and hide
-	// these chrome rows rather than overlapping them.
+	// one Micro status line per pane, the two-row key menu, and the bottom
+	// InfoBar. Compact terminals retain an editor row and hide these chrome rows
+	// rather than overlapping them.
 	a.statusRow, a.menuRow1, a.menuRow2 = -1, -1, -1
 	if rows >= 5 {
 		a.rows = rows - 4
-		a.statusRow = a.rows + 1
-		a.menuRow1 = a.rows + 2
-		a.menuRow2 = a.rows + 3
+		a.menuRow1 = a.rows + 1
+		a.menuRow2 = a.rows + 2
+		a.statusRow = a.rows + 3
 	} else {
 		a.rows = rows
 	}
@@ -440,6 +485,13 @@ func (a *App) resize(cols, rows int) {
 	if rightWidth < 1 {
 		rightWidth = 1
 	}
+	startCols := [2]int{}
+	if a.left.view != nil {
+		startCols[0] = a.left.view.StartCol
+	}
+	if a.right.view != nil {
+		startCols[1] = a.right.view.StartCol
+	}
 	for i, p := range a.panes() {
 		p.x = 0
 		p.width = leftWidth
@@ -447,7 +499,13 @@ func (a *App) resize(cols, rows int) {
 			p.x = leftWidth + 1
 			p.width = rightWidth
 		}
-		p.view = display.NewBufWindow(p.x, 0, p.width, a.rows, p.buf)
+		p.h = action.NewBufPaneFromBuf(p.buf, nil)
+		p.h.PromptBufferName = func() string { return a.panePromptName(p) }
+		p.view = p.h.BWindow.(*display.BufWindow)
+		p.view.X, p.view.Y = p.x, 0
+		if !p.buf.Settings["softwrap"].(bool) {
+			p.view.StartCol = startCols[i]
+		}
 		p.view.Resize(p.width, a.rows)
 		p.view.SetActive((i == 0 && a.focus == viewport.Left) || (i == 1 && a.focus == viewport.Right))
 		p.statusView = &display.BufWindow{
@@ -455,8 +513,6 @@ func (a *App) resize(cols, rows int) {
 			Buf:  p.buf,
 		}
 		p.statusView.SetActive((i == 0 && a.focus == viewport.Left) || (i == 1 && a.focus == viewport.Right))
-		p.h = action.NewBufPaneFromBuf(p.buf, nil)
-		p.h.BWindow = p.view
 	}
 	a.microTab = &action.Tab{}
 	a.microTab.Panes = []action.Pane{a.left.h, a.right.h}
@@ -485,6 +541,9 @@ func (a *App) snapshots() ([]string, []string) {
 }
 
 func (a *App) wrapHeight(p *pane, line int) int {
+	if line < 0 || line >= p.buf.LinesNum() || p.view == nil {
+		return 1
+	}
 	end := len([]rune(p.buf.Line(line)))
 	return p.view.VLocFromLoc(buffer.Loc{X: end, Y: line}).Row + 1
 }
@@ -493,6 +552,9 @@ type anchor struct {
 	side       viewport.Side
 	text       string
 	occurrence int
+	line       int
+	before     []string
+	after      []string
 	wrapRow    int
 	fallback   int
 	valid      bool
@@ -525,10 +587,58 @@ func (a *App) captureAnchor() anchor {
 			occurrence++
 		}
 	}
-	return anchor{side: side, text: text, occurrence: occurrence, wrapRow: cell.WrapRow, fallback: rowIndex, valid: true}
+	return anchor{
+		side: side, text: text, occurrence: occurrence, line: cell.Line,
+		before: surroundingLines(lines, cell.Line, -1), after: surroundingLines(lines, cell.Line, 1),
+		wrapRow: cell.WrapRow, fallback: rowIndex, valid: true,
+	}
+}
+
+func (a *App) captureAnchorForSnapshot(left, right []string) anchor {
+	if !a.hasPendingAnchor {
+		return a.captureAnchor()
+	}
+	previous := a.pendingAnchor
+	lines := left
+	if previous.side == viewport.Right {
+		lines = right
+	}
+	if previous.line >= 0 && previous.line < len(lines) && lines[previous.line] == previous.text {
+		previous.occurrence = 0
+		for line := 0; line < previous.line; line++ {
+			if lines[line] == previous.text {
+				previous.occurrence++
+			}
+		}
+	}
+	return previous
+}
+
+func anchorMatchesSnapshot(previous anchor, left, right []string) bool {
+	if !previous.valid {
+		return false
+	}
+	lines := left
+	if previous.side == viewport.Right {
+		lines = right
+	}
+	return previous.line >= 0 && previous.line < len(lines) && lines[previous.line] == previous.text
+}
+
+func surroundingLines(lines []string, line, direction int) []string {
+	context := make([]string, 0, 3)
+	for distance := 1; distance <= 3; distance++ {
+		index := line + direction*distance
+		if index < 0 || index >= len(lines) {
+			break
+		}
+		context = append(context, lines[index])
+	}
+	return context
 }
 
 func (a *App) ensureCursorVisible() {
+	a.refreshLayoutIfNeeded()
 	if len(a.layout.Rows) == 0 || a.rows <= 0 {
 		a.top = 0
 		return
@@ -538,6 +648,7 @@ func (a *App) ensureCursorVisible() {
 		p, side = &a.right, viewport.Right
 	}
 	loc := p.h.Cursor.Loc
+	p.view.Relocate()
 	wrapRow := p.view.VLocFromLoc(loc).Row
 	row := a.layout.CursorRow(side, loc.Y, wrapRow)
 	if row < 0 {
@@ -682,6 +793,14 @@ func (a *App) requestQuit() bool {
 	return a.quitComplete
 }
 
+func (a *App) panePromptName(p *pane) string {
+	side := "left"
+	if p == &a.right {
+		side = "right"
+	}
+	return fmt.Sprintf("%s pane (%s)", side, filepath.Base(p.buf.GetName()))
+}
+
 func (a *App) advanceQuitDecisions(flow *quitFlow) {
 	if a.quitFlow != flow {
 		return
@@ -696,7 +815,7 @@ func (a *App) advanceQuitDecisions(flow *quitFlow) {
 			flow.saves = append(flow.saves, p)
 			continue
 		}
-		action.InfoBar.YNPrompt("Save changes to "+p.buf.GetName()+" before closing? (y,n,esc)", func(yes, canceled bool) {
+		action.InfoBar.YNPrompt("Save changes to "+a.panePromptName(p)+" before closing? (y,n,esc)", func(yes, canceled bool) {
 			if a.quitFlow != flow {
 				return
 			}
@@ -750,7 +869,7 @@ func (a *App) newFocusedDocument() {
 		a.rebuildWithAnchor(anchor)
 	}
 	if p.buf.Modified() && !p.buf.Shared() {
-		action.InfoBar.YNPrompt("Save changes to "+p.buf.GetName()+" before closing? (y,n,esc)", func(yes, canceled bool) {
+		action.InfoBar.YNPrompt("Save changes to "+a.panePromptName(p)+" before closing? (y,n,esc)", func(yes, canceled bool) {
 			if canceled {
 				return
 			}
@@ -914,10 +1033,18 @@ func (a *App) handleRejectedSequence(event *tcell.EventKey) bool {
 
 func (a *App) rebuildWithAnchor(previous anchor) {
 	left, right := a.snapshots()
+	if a.hasPendingAnchor {
+		pending := a.captureAnchorForSnapshot(left, right)
+		if anchorMatchesSnapshot(pending, left, right) {
+			previous = pending
+		}
+	}
 	a.pairs = compare.Align(left, right)
 	a.displayedLeft = append([]string(nil), left...)
 	a.displayedRight = append([]string(nil), right...)
 	a.expandWithAnchor(previous, left, right)
+	a.hasPendingAnchor = false
+	a.pendingAnchor = anchor{}
 	if a.coordinator != nil {
 		a.versions = DiffVersions{Left: a.left.buf.ContentVersion(), Right: a.right.buf.ContentVersion()}
 	}
@@ -934,8 +1061,36 @@ func (a *App) expandWithAnchor(previous anchor, snapshots ...[]string) {
 		left, right = snapshots[0], snapshots[1]
 	}
 	a.layout = layoutFor(a.pairs, func(line int) int { return a.wrapHeight(&a.left, line) }, func(line int) int { return a.wrapHeight(&a.right, line) })
+	a.layoutKey = a.currentLayoutKey()
 	a.restoreAnchor(previous, left, right)
 	a.ensureCursorVisible()
+}
+
+func (a *App) currentLayoutKey() appLayoutKey {
+	return appLayoutKey{left: paneKey(&a.left), right: paneKey(&a.right)}
+}
+
+func paneKey(p *pane) paneLayoutKey {
+	if p == nil || p.buf == nil || p.view == nil {
+		return paneLayoutKey{}
+	}
+	tabsize, _ := p.buf.Settings["tabsize"].(float64)
+	return paneLayoutKey{
+		width: p.width, buffer: p.view.BufView().Width,
+		softwrap: p.buf.Settings["softwrap"].(bool), wordwrap: p.buf.Settings["wordwrap"].(bool),
+		tabsize: int(tabsize),
+	}
+}
+
+func (a *App) refreshLayoutIfNeeded() {
+	key := a.currentLayoutKey()
+	if key == a.layoutKey || a.left.view == nil || a.right.view == nil {
+		return
+	}
+	anchor := a.captureAnchor()
+	a.layout = layoutFor(a.pairs, func(line int) int { return a.wrapHeight(&a.left, line) }, func(line int) int { return a.wrapHeight(&a.right, line) })
+	a.layoutKey = key
+	a.restoreAnchor(anchor, a.displayedLeft, a.displayedRight)
 }
 
 func (a *App) restoreAnchor(previous anchor, left, right []string) {
@@ -948,23 +1103,68 @@ func (a *App) restoreAnchor(previous anchor, left, right []string) {
 	if previous.side == viewport.Right {
 		lines, side = right, viewport.Right
 	}
+	bestLine, bestScore := -1, -1
+	bestOccurrenceDistance, bestDistance := int(^uint(0)>>1), int(^uint(0)>>1)
 	occurrence := 0
-	for line, text := range lines {
-		if text != previous.text {
-			continue
+	for line := range lines {
+		candidateOccurrence := -1
+		if lines[line] == previous.text {
+			candidateOccurrence = occurrence
+			occurrence++
 		}
-		if occurrence == previous.occurrence {
-			row := a.layout.CursorRow(side, line, previous.wrapRow)
-			if row >= 0 {
-				a.top = row
-				a.clampTop()
-				return
-			}
+		score := 0
+		if lines[line] == previous.text {
+			score += 32
 		}
-		occurrence++
+		score += matchingContext(lines, line, previous.before, -1)
+		score += matchingContext(lines, line, previous.after, 1)
+		occurrenceDistance := int(^uint(0) >> 1)
+		if candidateOccurrence >= 0 {
+			occurrenceDistance = abs(candidateOccurrence - previous.occurrence)
+		}
+		distance := abs(line - previous.line)
+		if score > bestScore || (score == bestScore && occurrenceDistance < bestOccurrenceDistance) ||
+			(score == bestScore && occurrenceDistance == bestOccurrenceDistance && distance < bestDistance) {
+			bestLine, bestScore = line, score
+			bestOccurrenceDistance, bestDistance = occurrenceDistance, distance
+		}
+	}
+	if bestLine >= 0 && bestScore > 0 {
+		wrapRow := previous.wrapRow
+		if wrapRow >= a.layout.WrapHeight(side, bestLine) {
+			wrapRow = max(0, a.layout.WrapHeight(side, bestLine)-1)
+		}
+		row := a.layout.CursorRow(side, bestLine, wrapRow)
+		if row >= 0 {
+			a.top = row
+			a.clampTop()
+			return
+		}
 	}
 	a.top = previous.fallback
 	a.clampTop()
+}
+
+func matchingContext(lines []string, line int, context []string, direction int) int {
+	matches := 0
+	for distance, expected := range context {
+		index := line + direction*(distance+1)
+		if index < 0 || index >= len(lines) {
+			break
+		}
+		if lines[index] != expected {
+			break
+		}
+		matches += 1 << max(0, 2-distance)
+	}
+	return matches
+}
+
+func abs(value int) int {
+	if value < 0 {
+		return -value
+	}
+	return value
 }
 
 func (a *App) focusedPane() *pane {
@@ -1015,9 +1215,19 @@ func (a *App) handleMouse(e *tcell.EventMouse) {
 		cell, p = row.Right, &a.right
 	}
 	if cell.Line < 0 {
-		return
+		if !cell.Spacer {
+			return
+		}
+		cell, _ = a.nearestCell(side, rowIndex)
+		if cell.Line < 0 {
+			return
+		}
 	}
-	visualX := x - p.x
+	if cell.Continuation {
+		cell.WrapRow = max(0, a.layout.WrapHeight(side, cell.Line)-1)
+	}
+	visualX := x - p.view.BufView().X
+	visualX = max(0, visualX)
 	if !p.buf.Settings["softwrap"].(bool) {
 		visualX += p.view.StartCol
 	}
@@ -1027,80 +1237,97 @@ func (a *App) handleMouse(e *tcell.EventMouse) {
 	a.ensureCursorVisible()
 }
 
+// nearestCell resolves a clicked virtual spacer to the closest real line in
+// that pane. Ties prefer the preceding line; at the start of a pane, the next
+// line is used.
+func (a *App) nearestCell(side viewport.Side, row int) (viewport.Cell, int) {
+	for distance := 1; distance < len(a.layout.Rows); distance++ {
+		for _, candidate := range []int{row - distance, row + distance} {
+			cell := a.layout.CellAt(side, candidate)
+			if cell.Line >= 0 && !cell.Spacer && !cell.Continuation {
+				return cell, candidate
+			}
+		}
+	}
+	return viewport.Cell{Line: -1, Spacer: true}, row
+}
+
 func (a *App) jumpDiff(direction int) {
 	if len(a.layout.Rows) == 0 {
 		return
 	}
-	start := a.top
-	if direction > 0 {
-		start++
-	} else {
-		start--
-	}
-	for i := start; i >= 0 && i < len(a.layout.Rows); i += direction {
-		if a.layout.Rows[i].Kind == compare.Equal {
+	type hunk struct{ start, end int }
+	hunks := make([]hunk, 0)
+	for row := 0; row < len(a.layout.Rows); {
+		if a.layout.Rows[row].Kind == compare.Equal {
+			row++
 			continue
 		}
-		hunkStart := i
-		for hunkStart > 0 && a.layout.Rows[hunkStart-1].Kind != compare.Equal {
-			hunkStart--
+		start := row
+		for row < len(a.layout.Rows) && a.layout.Rows[row].Kind != compare.Equal {
+			row++
 		}
-		hunkEnd := i + 1
-		for hunkEnd < len(a.layout.Rows) && a.layout.Rows[hunkEnd].Kind != compare.Equal {
-			hunkEnd++
-		}
-		pane, side := &a.left, viewport.Left
-		if a.focus == viewport.Right {
-			pane, side = &a.right, viewport.Right
-		}
-		line := -1
-		for rowIndex := hunkStart; rowIndex < hunkEnd; rowIndex++ {
-			cell := a.layout.Rows[rowIndex].Left
-			if side == viewport.Right {
-				cell = a.layout.Rows[rowIndex].Right
-			}
-			if cell.Line >= 0 {
-				line = cell.Line
+		hunks = append(hunks, hunk{start: start, end: row})
+	}
+	selected := -1
+	if direction > 0 {
+		for i, current := range hunks {
+			if current.start > a.top {
+				selected = i
 				break
 			}
 		}
-		if line < 0 {
-			for distance := 1; line < 0; distance++ {
-				rowIndices := []int{hunkStart - distance, hunkEnd - 1 + distance}
-				if direction > 0 {
-					rowIndices = []int{hunkEnd - 1 + distance, hunkStart - distance}
-				}
-				for _, rowIndex := range rowIndices {
-					if rowIndex < 0 || rowIndex >= len(a.layout.Rows) {
-						continue
-					}
-					cell := a.layout.Rows[rowIndex].Left
-					if side == viewport.Right {
-						cell = a.layout.Rows[rowIndex].Right
-					}
-					if cell.Line >= 0 {
-						line = cell.Line
-						break
-					}
-				}
-				if hunkStart-distance < 0 && hunkEnd-1+distance >= len(a.layout.Rows) {
+	} else {
+		for i := len(hunks) - 1; i >= 0; i-- {
+			if hunks[i].end <= a.top {
+				selected = i
+				break
+			}
+		}
+	}
+	if selected < 0 {
+		return
+	}
+	target := hunks[selected]
+	pane, side := &a.left, viewport.Left
+	if a.focus == viewport.Right {
+		pane, side = &a.right, viewport.Right
+	}
+	line := -1
+	for row := target.start; row < target.end; row++ {
+		cell := a.layout.CellAt(side, row)
+		if cell.Line >= 0 && !cell.Continuation {
+			line = cell.Line
+			break
+		}
+	}
+	if line < 0 {
+		neighbor := target.end
+		if direction < 0 {
+			neighbor = target.start - 1
+		}
+		for distance := 0; line < 0 && distance < len(a.layout.Rows); distance++ {
+			for _, row := range []int{neighbor + direction*distance, neighbor - direction*distance} {
+				cell := a.layout.CellAt(side, row)
+				if cell.Line >= 0 && !cell.Continuation {
+					line = cell.Line
 					break
 				}
 			}
 		}
-		if line >= 0 {
-			pane.h.GotoLoc(buffer.Loc{X: 0, Y: line})
-		}
-		a.top = hunkStart
-		a.ensureCursorVisible()
-		return
 	}
+	a.top = target.start
+	if line >= 0 {
+		pane.h.GotoLoc(buffer.Loc{X: 0, Y: line})
+	}
+	a.ensureCursorVisible()
 }
 
 func (a *App) draw() {
 	if a.terminal == nil || a.paintScreen == nil {
 		return
 	}
+	a.refreshLayoutIfNeeded()
 	width, height := a.terminal.Size()
 	a.surface.SetSize(width, height)
 	a.paintScreen.SetSize(width, height)
@@ -1114,10 +1341,7 @@ func (a *App) draw() {
 	for y := 0; y < a.rows; y++ {
 		screen.SetContent(a.left.width, y, '│', nil, config.DefStyle)
 	}
-	status := a.focusName()
-	if a.isDiffStale() {
-		status = "Diff updating… | " + status
-	}
+	status := ""
 	if a.diffErr != nil {
 		status = "Diff error: " + a.diffErr.Error() + " | " + status
 	}
@@ -1134,10 +1358,10 @@ func (a *App) draw() {
 		for _, p := range a.panes() {
 			display.NewStatusLine(p.statusView).Display()
 		}
-		a.renderLine(a.statusRow, status, config.DefStyle)
 		menuStyle := microMenuStyle()
 		a.renderMenuLine(a.menuRow1, a.shortcutBar(0), a.focusNameIndicator(), menuStyle)
 		a.renderMenuLine(a.menuRow2, a.shortcutBar(1), "mdiff (wrapping micro) "+version.Version, menuStyle)
+		a.renderLine(a.statusRow, status, config.DefStyle)
 	}
 	cursorX, cursorY, cursorVisible := a.cursorPosition()
 	screen.Screen = terminal
@@ -1156,13 +1380,6 @@ func (a *App) draw() {
 		terminal.HideCursor()
 	}
 	a.terminal.Show()
-}
-
-func (a *App) focusName() string {
-	if a.focus == viewport.Right {
-		return "right"
-	}
-	return "left"
 }
 
 func (a *App) renderLine(y int, text string, style tcell.Style) {
@@ -1249,10 +1466,10 @@ func displayBindingKey(key string) string {
 }
 
 func microMenuStyle() tcell.Style {
-	if style, ok := config.Colorscheme["statusline"]; ok {
+	if style, ok := config.Colorscheme["message"]; ok {
 		return style
 	}
-	return config.DefStyle.Reverse(true)
+	return config.DefStyle
 }
 
 func (a *App) focusNameIndicator() string {
@@ -1330,10 +1547,9 @@ func (a *App) cursorPosition() (x, y int, visible bool) {
 	if row < a.top || row >= a.top+a.rows || row < 0 {
 		return 0, 0, false
 	}
-	x = p.x + visual.VisualX - p.view.StartCol
-	if p.buf.Settings["softwrap"].(bool) {
-		x = p.x + visual.VisualX
-	}
+	// VisualX is relative to Micro's text area. Include its line-number,
+	// diff, and message gutters so the terminal cursor lands on the glyph.
+	x = p.view.BufView().X + visual.VisualX - p.view.StartCol
 	if x < p.x || x >= p.x+p.width {
 		return 0, 0, false
 	}
