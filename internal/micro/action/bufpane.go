@@ -11,7 +11,6 @@ import (
 	"github.com/nevdelap/mdiff/internal/micro/config"
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	ulua "github.com/nevdelap/mdiff/internal/micro/lua"
-	"github.com/nevdelap/mdiff/internal/micro/screen"
 	"github.com/nevdelap/mdiff/internal/micro/util"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -69,7 +68,7 @@ func LuaAction(fn string, k Event) BufAction {
 		action = BufKeyAction(func(h *BufPane) bool {
 			val, err := pl.Call(plFn, luar.New(ulua.L, h))
 			if err != nil {
-				screen.TermMessage(err)
+				reportPluginError(err)
 			}
 			if v, ok := val.(lua.LBool); !ok {
 				return false
@@ -81,7 +80,7 @@ func LuaAction(fn string, k Event) BufAction {
 		action = BufMouseAction(func(h *BufPane, te *tcell.EventMouse) bool {
 			val, err := pl.Call(plFn, luar.New(ulua.L, h), luar.New(ulua.L, te))
 			if err != nil {
-				screen.TermMessage(err)
+				reportPluginError(err)
 			}
 			if v, ok := val.(lua.LBool); !ok {
 				return false
@@ -116,8 +115,7 @@ func BufMapEvent(k Event, action string) {
 			types = append(types, ' ')
 			action = ""
 		}
-		if strings.HasPrefix(a, "command:") || strings.HasPrefix(a, "command-edit:") ||
-			strings.HasPrefix(a, "lua:") || prototypeUnsafeAction(a) {
+		if strings.HasPrefix(a, "command:") || strings.HasPrefix(a, "command-edit:") || prototypeUnsafeAction(a) {
 			RejectedBufferBindings[k.Name()] = requested
 			return
 		}
@@ -347,7 +345,7 @@ func (h *BufPane) finishInitialize() {
 
 	err := config.RunPluginFn("onBufPaneOpen", luar.New(ulua.L, h))
 	if err != nil {
-		screen.TermMessage(err)
+		reportPluginError(err)
 	}
 }
 
@@ -387,7 +385,7 @@ func (h *BufPane) PluginCB(cb string, args ...any) bool {
 
 	b, err := config.RunPluginFnBool(h.Buf.Settings, cb, largs...)
 	if err != nil {
-		screen.TermMessage(err)
+		reportPluginError(err)
 	}
 	return b
 }
@@ -704,6 +702,10 @@ func (h *BufPane) DoRuneInsert(r rune) {
 
 // VSplitIndex opens the given buffer in a vertical split on the given side.
 func (h *BufPane) VSplitIndex(buf *buffer.Buffer, right bool) *BufPane {
+	if h.tab == nil || h.tab.Node == nil {
+		reportUnavailablePluginLayout("plugins cannot create independent panes")
+		return nil
+	}
 	e := NewBufPaneFromBuf(buf, h.tab)
 	e.splitID = h.tab.GetNode(h.splitID).VSplit(right)
 	currentPaneIdx := h.tab.GetPane(h.splitID)
@@ -718,6 +720,10 @@ func (h *BufPane) VSplitIndex(buf *buffer.Buffer, right bool) *BufPane {
 
 // HSplitIndex opens the given buffer in a horizontal split on the given side.
 func (h *BufPane) HSplitIndex(buf *buffer.Buffer, bottom bool) *BufPane {
+	if h.tab == nil || h.tab.Node == nil {
+		reportUnavailablePluginLayout("plugins cannot create independent panes")
+		return nil
+	}
 	e := NewBufPaneFromBuf(buf, h.tab)
 	e.splitID = h.tab.GetNode(h.splitID).HSplit(bottom)
 	currentPaneIdx := h.tab.GetPane(h.splitID)
@@ -769,7 +775,7 @@ func (h *BufPane) SetActive(b bool) {
 
 		err := config.RunPluginFn("onSetActive", luar.New(ulua.L, h))
 		if err != nil {
-			screen.TermMessage(err)
+			reportPluginError(err)
 		}
 	}
 }

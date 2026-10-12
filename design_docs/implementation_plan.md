@@ -892,9 +892,10 @@ Handoff:
   `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime assets override
   embedded assets by name. The command-line debounce overrides
   `mdiff.diff-debounce-ms` in `settings.json`.
-- Startup does not create the Micro config directory or write source config,
-  settings defaults, or buffer-state files. Explicit document saves and
-  configured backups/autosave remain enabled.
+- mdiff startup does not create the Micro config directory or write source
+  config, settings defaults, or buffer-state files. Trusted Micro plugins keep
+  their normal file effects, including persistence through `TryBindKey`.
+  Explicit document saves and configured backups/autosave remain enabled.
 - Both panes receive Micro's parsed options and synthetic filetype settings.
   Configured bindings are loaded with mdiff lifecycle controls reserved;
   unsupported bindings, including Micro actions that only change a private pane
@@ -910,7 +911,7 @@ Handoff:
 
 ### TASK-007 - Complete Micro plugin compatibility within the two-pane model
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -969,9 +970,29 @@ Verification:
 
 Handoff:
 
-- Record plugins tested, hooks supported, and two-pane-specific adaptations.
-  Identify representative fixtures by category: pane-local editing, file
-  operations, tabs/splits, and independent scroll behavior.
+- Startup discovers bundled plugins, Micro `init.lua`, and user plugins under
+  `plug/`; it installs Micro's `import` bridge and runs `preinit`, `init`, and
+  `postinit` before constructing pane buffers. Buffer-open, pane-open, active
+  pane, action, and text-event callbacks use Micro's Lua runtime.
+- A fixture also verifies the `init.lua` path and a plugin-provided runtime
+  colorscheme. An unavailable scheme aborts startup after plugin initialization
+  and restores the terminal; plugin script and callback errors go to the status
+  UI without a blocking prompt.
+- The selected colorscheme resolves after plugin initialization so plugins can
+  register runtime schemes. If no plugin or runtime file provides the selected
+  scheme, startup reports an error and restores the terminal.
+- A fixture plugin verifies Lua actions and hooks edit only the focused buffer,
+  trigger diff updates, and retain Micro's file-write and process-call behavior.
+  Startup leaves a missing `bindings.json` untouched until a plugin explicitly
+  calls Micro's persistent `TryBindKey` API; that call creates the file and
+  saves the requested binding, matching Micro behavior.
+- Micro plugins receive one `Tab` exposing the two mdiff panes. Operations that
+  create tabs/panes or resize an independent Micro layout display an unavailable
+  status message; Micro's per-pane private scrolling remains outside mdiff's
+  shared viewport. Plugins remain trusted code with their normal filesystem,
+  process, and network access; no sandbox is claimed.
+- Verified: `just format`, `just lint`, `just test`, `just test-pty`, and
+  `just build` pass.
 
 ### TASK-008 - Harden shared viewport and terminal interaction
 

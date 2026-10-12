@@ -8,6 +8,12 @@ import (
 	"strings"
 )
 
+// MessageHandler redirects Micro's blocking startup messages into an
+// application-owned status UI when the editor is already running.
+var MessageHandler func(string)
+
+func SetMessageHandler(handler func(string)) { MessageHandler = handler }
+
 // TermMessage sends a message to the user in the terminal. This usually occurs before
 // micro has been fully initialized -- ie if there is an error in the syntax highlighting
 // regular expressions
@@ -15,6 +21,10 @@ import (
 // This will write the message, and wait for the user
 // to press and key to continue
 func TermMessage(msg ...any) {
+	if MessageHandler != nil {
+		MessageHandler(fmt.Sprint(msg...))
+		return
+	}
 	screenb := TempFini()
 
 	fmt.Println(msg...)

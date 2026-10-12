@@ -495,24 +495,30 @@ dependency container for config, open buffers, screen, and plugin state.
    Assign file operands left-to-right to the two panes and reject more than two
    before terminal initialization. Use the real application version for
    `--version` and the footer.
-2. Initialize Micro config paths and load existing options, bindings, schemes,
-   syntax definitions, and configured plugins using Micro's normal behavior.
-   Keep Micro configuration files unchanged unless Micro itself would modify
-   them as part of its normal operation.
+2. Initialize Micro config paths and read existing options, bindings, and syntax
+   definitions. Discover configured plugins from Micro's normal paths. Keep
+   Micro configuration files unchanged unless Micro itself would modify them as
+   part of its normal behavior.
 3. Initialize tcell and install a deferred, idempotent `Fini` path before
    starting the event loop. Register signal handling for interrupt and
    termination signals; cancellation exits through the same cleanup. Avoid
    attempting unsafe terminal work from signal handlers.
-4. Construct two Micro buffers, loaded from their corresponding file operands or
+4. Initialize Micro's Lua bridge, load configured plugins, and run their normal
+   startup callbacks before constructing pane buffers. Resolve the selected
+   colorscheme afterward so plugin-provided runtime schemes are available. If
+   the selected scheme remains unavailable, restore the terminal before
+   returning the error. Report plugin script and callback failures in mdiff's
+   status UI without blocking for a keypress.
+5. Construct two Micro buffers, loaded from their corresponding file operands or
    as unnamed buffers. Keep independent paths, names, metadata, and editor
    state. Initialize a normal Micro `BufPane` around each.
-5. Set both panes' vertical view adapter to the shared viewport controller.
+6. Set both panes' vertical view adapter to the shared viewport controller.
    Configure a two-column layout, a Micro status line per pane, a shared
    transient-message area, and Micro's two-row key menu at the bottom edge.
-6. Render, route terminal events, apply edits through Micro actions, schedule
+7. Render, route terminal events, apply edits through Micro actions, schedule
    comparison after content changes, and install only results whose versions
    match both current buffers.
-7. On quit or signal, follow Micro's configured buffer save, backup, recovery,
+8. On quit or signal, follow Micro's configured buffer save, backup, recovery,
    and teardown behavior for each pane. Stop comparison workers and timers,
    finalize both buffers, call tcell `Fini`, and return.
 
@@ -543,27 +549,25 @@ action names. Do not copy defaults over user files. The `mdiff.diff-debounce-ms`
 override lives in a namespaced `mdiff` object in Micro's `settings.json`; the
 `--diff-debounce` command-line option takes precedence.
 
-| Micro feature                | Observed behavior                                                                                                                                                           | Status and limitation                                                                                                                                                                                                                               |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Config directory             | `--config-dir`, `MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime files override embedded files.                                          | Supported. Missing config directories are not created.                                                                                                                                                                                              |
-| `settings.json`              | Micro options initialize both panes. Tested: indentation, tab size, wrapping, ruler/relative ruler, filetype, colorscheme, and `mdiff.diff-debounce-ms`; CLI debounce wins. | Partial. Pane/viewport-incompatible or unimplemented UI options have no effect. Malformed JSON fails before terminal mode.                                                                                                                          |
-| `bindings.json`              | Micro buffer bindings load through Micro parsing. Supported shortcut labels follow remaps and omit removed/unavailable actions.                                             | Partial. Shell, Lua, unknown actions, lifecycle-breaking actions, and private-view `ScrollUp`, `ScrollDown`, `Center`, `Start`, `End`, `PageUp`, `PageDown`, `HalfPageUp`, and `HalfPageDown` actions are rejected. mdiff-owned keys stay reserved. |
-| `colorschemes/`              | The configured scheme styles syntax and UI; shortcut rows use its statusline style, with reversed Micro default fallback when absent.                                       | Supported for valid bundled/user schemes. Missing or malformed selected schemes fail before terminal mode. Diff styles have fallbacks.                                                                                                              |
-| `syntax/`                    | Micro syntax definitions load for filename detection and explicit configured filetypes, including unnamed buffers.                                                          | Partial. Invalid syntax is diagnosed and built-in defaults remain available; no filetype picker.                                                                                                                                                    |
-| Lua plugins and `plug/`      | Not loaded in this task.                                                                                                                                                    | Unsupported until TASK-007.                                                                                                                                                                                                                         |
-| Micro commands and clipboard | Supported commands and Micro clipboard methods work in the focused pane.                                                                                                    | Partial. Shell, tab/window, and independent viewport operations are unavailable or adapted; external clipboard depends on platform tools.                                                                                                           |
-| Bottom menu and pane status  | Micro order and separators, supported remapped labels, active statusline colors, and Micro pane status fields are retained.                                                 | Partial. mdiff controls stay reserved; New Tab replaces the focused document to preserve two panes.                                                                                                                                                 |
+| Micro feature                | Observed behavior                                                                                                                                                                                                                                        | Status and limitation                                                                                                                                                                                                                                                                   |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Config directory             | `--config-dir`, `MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime files override embedded files.                                                                                                                       | Supported. Missing config directories are not created.                                                                                                                                                                                                                                  |
+| `settings.json`              | Micro options initialize both panes. Tested: indentation, tab size, wrapping, ruler/relative ruler, filetype, colorscheme, and `mdiff.diff-debounce-ms`; CLI debounce wins.                                                                              | Partial. Pane/viewport-incompatible or unimplemented UI options have no effect. Malformed JSON fails before terminal mode.                                                                                                                                                              |
+| `bindings.json`              | Micro buffer bindings load through Micro parsing. Supported shortcut labels follow remaps and omit removed/unavailable actions.                                                                                                                          | Partial. Shell, unknown actions, lifecycle-breaking actions, and private-view `ScrollUp`, `ScrollDown`, `Center`, `Start`, `End`, `PageUp`, `PageDown`, `HalfPageUp`, and `HalfPageDown` actions are rejected. Loaded Lua plugin actions are supported; mdiff-owned keys stay reserved. |
+| `colorschemes/`              | The configured scheme styles syntax and UI; shortcut rows use its statusline style, with reversed Micro default fallback when absent. Plugins may register a runtime scheme during initialization.                                                       | Supported for valid bundled/user/plugin schemes. Missing or malformed selected schemes abort startup after plugin initialization and restore the terminal. Diff styles have fallbacks.                                                                                                  |
+| `syntax/`                    | Micro syntax definitions load for filename detection and explicit configured filetypes, including unnamed buffers.                                                                                                                                       | Partial. Invalid syntax is diagnosed and built-in defaults remain available; no filetype picker.                                                                                                                                                                                        |
+| Lua plugins and `plug/`      | Micro discovers bundled plugins, `init.lua`, and user `plug/` plugins; its `import` bridge and preinit/init/postinit, buffer, pane, and action hooks run. A fixture verifies a plugin's focused-pane edit, Lua keybinding, file write, and process call. | Partial. Two-pane and shared-viewport constraints reject tab/pane creation and independent layout operations. Plugins retain Micro's unrestricted filesystem, process, and network access. They are trusted code; no sandbox is provided.                                               |
+| Micro commands and clipboard | Supported commands and Micro clipboard methods work in the focused pane.                                                                                                                                                                                 | Partial. Shell, tab/window, and independent viewport operations are unavailable or adapted; external clipboard depends on platform tools.                                                                                                                                               |
+| Bottom menu and pane status  | Micro order and separators, supported remapped labels, active statusline colors, and Micro pane status fields are retained.                                                                                                                              | Partial. mdiff controls stay reserved; New Tab replaces the focused document to preserve two panes.                                                                                                                                                                                     |
 
-Configuration is read-only: startup does not write defaults or modify source
-settings, bindings, schemes, or syntax files. Explicit Save and configured
-document backup/autosave may write document artifacts. `savecursor` and
-`saveundo` state serialization is disabled so mdiff never writes buffer state
-into the Micro config directory. When TASK-007 enables Micro plugins, they
-should execute with the same filesystem and process access they have in Micro.
-Load them through Micro's configured startup behavior and do not impose a
-separate opt-in or no-write restriction. Adapt a plugin only when its behavior
-requires more than two panes or breaks shared diff alignment; document any such
-case with evidence. Do not claim plugins are sandboxed.
+mdiff does not create config defaults or serialize buffer state into the Micro
+config directory. `savecursor` and `saveundo` state serialization is disabled.
+Micro plugins run with their normal filesystem, process, and network access, so
+they may create or modify files as configured; no mdiff plugin sandbox or opt-in
+is provided. Startup does not create a missing `bindings.json`, but a plugin's
+explicit `TryBindKey` call has Micro's normal persistence behavior and writes
+the binding. Plugin operations that create tabs/panes or independent layouts are
+reported as unavailable to preserve the two-pane shared viewport.
 
 ### Micro-style status lines and key menu
 

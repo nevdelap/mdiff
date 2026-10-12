@@ -1,6 +1,9 @@
 package action
 
-import "github.com/nevdelap/mdiff/internal/micro/buffer"
+import (
+	"github.com/nevdelap/mdiff/internal/micro/buffer"
+	"github.com/nevdelap/mdiff/internal/micro/config"
+)
 
 // InfoBar is the global info bar.
 var InfoBar *InfoPane
@@ -18,6 +21,22 @@ func InitGlobals() {
 // GetInfoBar returns the infobar pane
 func GetInfoBar() *InfoPane {
 	return InfoBar
+}
+
+func reportUnavailablePluginLayout(message string) {
+	if InfoBar != nil {
+		InfoBar.Message("mdiff: " + message)
+	}
+}
+
+func reportPluginError(err error) {
+	if err == nil {
+		return
+	}
+	config.AddDiagnostic(err.Error())
+	if InfoBar != nil {
+		InfoBar.Error(err)
+	}
 }
 
 // WriteLog writes a string to the log buffer

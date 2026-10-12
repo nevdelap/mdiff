@@ -269,13 +269,14 @@ func eventsEqual(e1 Event, e2 Event) bool {
 	return e1 == e2
 }
 
-// TryBindKeyPlug tries to bind a key for the plugin without writing to bindings.json.
-// This operation can be rejected by lockbindings to prevent unexpected actions by the user.
+// TryBindKeyPlug binds a key for a plugin and persists it to bindings.json,
+// matching Micro's plugin API. This operation can be rejected by lockbindings
+// to prevent unexpected actions by the user.
 func TryBindKeyPlug(k, v string, overwrite bool) (bool, error) {
 	if l, ok := config.GlobalSettings["lockbindings"]; ok && l.(bool) {
 		return false, errors.New("bindings is locked by the user")
 	}
-	return TryBindKey(k, v, overwrite, false)
+	return TryBindKey(k, v, overwrite, true)
 }
 
 // TryBindKey tries to bind a key by writing to config.ConfigDir/bindings.json
@@ -285,7 +286,9 @@ func TryBindKey(k, v string, overwrite bool, writeToFile bool) (bool, error) {
 	var parsed map[string]any
 
 	filename := filepath.Join(config.ConfigDir, "bindings.json")
-	createBindingsIfNotExist(filename)
+	if writeToFile {
+		createBindingsIfNotExist(filename)
+	}
 	if _, e = os.Stat(filename); e == nil {
 		input, err := os.ReadFile(filename)
 		if err != nil {
@@ -333,6 +336,9 @@ func TryBindKey(k, v string, overwrite bool, writeToFile bool) (bool, error) {
 		} else {
 			return true, nil
 		}
+	} else if errors.Is(e, fs.ErrNotExist) && !writeToFile {
+		BindKey(k, v, Binder["buffer"])
+		return true, nil
 	}
 	return false, e
 }

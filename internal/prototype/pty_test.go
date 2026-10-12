@@ -87,7 +87,7 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	writePTY(t, terminal, []byte{'n'}) // Discard both and exit.
 	waitProcess(t, cmd)
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
@@ -111,7 +111,7 @@ func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func TestCLIRejectsMoreThanTwoPathsBeforeTerminalInitialization(t *testing.T) {
@@ -183,7 +183,7 @@ func TestPTYFileArgumentsOpenSaveAndOpenOnlyFocusedPane(t *testing.T) {
 	writePTY(t, terminal, []byte{0x11}) // Ctrl+Q.
 	waitProcess(t, cmd)
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
@@ -221,7 +221,7 @@ func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
 	if got := readWorkflowFile(t, rightPath); got != "RIGHT-OLD\n" {
 		t.Fatalf("discarded right file changed: %q", got)
 	}
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
@@ -257,7 +257,7 @@ func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
 	if got := readWorkflowFile(t, leftPath); got != "LEFT-OLD\n" {
 		t.Fatalf("cancelled quit changed left file: %q", got)
 	}
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
@@ -289,7 +289,7 @@ func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
 	if got := readWorkflowFile(t, savePath); got != "UNNAMED-EDIT\n" {
 		t.Fatalf("saved unnamed buffer=%q", got)
 	}
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func waitForFileContents(t *testing.T, path, want string) {
@@ -549,13 +549,20 @@ func hasVisibleCursorInColumnRange(transcript []byte, minCol, maxCol int) bool {
 	return false
 }
 
-func assertNoPersistedConfigFiles(t *testing.T, configDir string) {
+func assertNoUnexpectedPersistedState(t *testing.T, configDir string) {
 	t.Helper()
 	entries, err := os.ReadDir(configDir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range entries {
+		if entry.Name() == "bindings.json" && !entry.IsDir() {
+			contents, err := os.ReadFile(filepath.Join(configDir, entry.Name()))
+			if err != nil || !bytes.Contains(contents, []byte(`"Alt-/": "lua:comment.comment"`)) || !bytes.Contains(contents, []byte(`"CtrlUnderscore": "lua:comment.comment"`)) {
+				t.Fatalf("bundled comment plugin bindings were not persisted: contents=%s err=%v", contents, err)
+			}
+			continue
+		}
 		if (entry.Name() != "buffers" && entry.Name() != "backups") || !entry.IsDir() {
 			t.Fatalf("editor wrote unexpected configuration or buffer state: %v", entries)
 		}

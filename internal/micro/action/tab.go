@@ -50,6 +50,10 @@ func (t *TabList) UpdateNames() {
 
 // AddTab adds a new tab to this TabList
 func (t *TabList) AddTab(p *Tab) {
+	if len(t.List) > 0 && t.List[0].Node == nil {
+		reportUnavailablePluginLayout("plugins cannot create independent tabs")
+		return
+	}
 	t.List = append(t.List, p)
 	t.Resize()
 	t.UpdateNames()
@@ -57,6 +61,10 @@ func (t *TabList) AddTab(p *Tab) {
 
 // RemoveTab removes a tab with the given id from the TabList
 func (t *TabList) RemoveTab(id uint64) {
+	if len(t.List) > 0 && t.List[0].Node == nil {
+		reportUnavailablePluginLayout("plugins cannot remove mdiff's paired panes")
+		return
+	}
 	for i, p := range t.List {
 		if len(p.Panes) == 0 {
 			continue
@@ -80,6 +88,12 @@ func (t *TabList) RemoveTab(id uint64) {
 // the tab bar should not be drawn so resizing must take
 // that into account
 func (t *TabList) Resize() {
+	for _, p := range t.List {
+		if p.Node == nil {
+			reportUnavailablePluginLayout("plugins cannot resize Micro tab layouts")
+			return
+		}
+	}
 	w, h := screen.Screen.Size()
 	iOffset := config.GetInfoBarOffset()
 	InfoBar.Resize(w, h-1)
@@ -159,7 +173,7 @@ func (t *TabList) SetActive(a int) {
 
 				err := config.RunPluginFn("onSetActive", luar.New(ulua.L, p.CurPane()))
 				if err != nil {
-					screen.TermMessage(err)
+					reportPluginError(err)
 				}
 			}
 		} else {
@@ -339,6 +353,9 @@ func (t *Tab) HandleEvent(event tcell.Event) {
 
 // SetActive changes the currently active pane to the specified index
 func (t *Tab) SetActive(i int) {
+	if i < 0 || i >= len(t.Panes) {
+		return
+	}
 	t.active = i
 	for j, p := range t.Panes {
 		if j == i {
@@ -351,6 +368,10 @@ func (t *Tab) SetActive(i int) {
 
 // AddPane adds a pane at a given index
 func (t *Tab) AddPane(pane Pane, i int) {
+	if t.Node == nil {
+		reportUnavailablePluginLayout("plugins cannot create independent panes")
+		return
+	}
 	if len(t.Panes) == i {
 		t.Panes = append(t.Panes, pane)
 		return
@@ -371,6 +392,10 @@ func (t *Tab) GetPane(splitid uint64) int {
 
 // Remove pane removes the pane with the given index
 func (t *Tab) RemovePane(i int) {
+	if t.Node == nil || i < 0 || i >= len(t.Panes) {
+		reportUnavailablePluginLayout("plugins cannot remove mdiff panes")
+		return
+	}
 	copy(t.Panes[i:], t.Panes[i+1:])
 	t.Panes[len(t.Panes)-1] = nil
 	t.Panes = t.Panes[:len(t.Panes)-1]
@@ -378,6 +403,10 @@ func (t *Tab) RemovePane(i int) {
 
 // Resize resizes all panes according to their corresponding split nodes
 func (t *Tab) Resize() {
+	if t.Node == nil {
+		reportUnavailablePluginLayout("plugins cannot resize Micro tab layouts")
+		return
+	}
 	for _, p := range t.Panes {
 		n := t.GetNode(p.ID())
 		pv := p.GetView()

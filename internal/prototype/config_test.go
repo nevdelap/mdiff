@@ -9,6 +9,7 @@ import (
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
+	"github.com/nevdelap/mdiff/internal/micro/screen"
 )
 
 func TestMicroSettingsApplyToBothPanesAndRemainReadOnly(t *testing.T) {
@@ -24,6 +25,7 @@ func TestMicroSettingsApplyToBothPanesAndRemainReadOnly(t *testing.T) {
   "saveundo": true,
   "filetype": "go",
   "colorscheme": "monokai",
+  "ftoptions": false,
   "mdiff": {"diff-debounce-ms": 120}
 }`)
 	bindings := []byte(`{"buffer":{"Ctrl-u":"Undo"}}`)
@@ -75,7 +77,16 @@ func TestMicroSettingsApplyToBothPanesAndRemainReadOnly(t *testing.T) {
 	}
 	app.handle(tcell.NewEventPaste("edited in memory", ""))
 	app.Close()
-	for path, want := range map[string][]byte{settingsPath: settings, bindingsPath: bindings} {
+	updatedBindings, err := os.ReadFile(bindingsPath)
+	if err != nil {
+		t.Fatalf("could not read plugin-updated bindings: %v", err)
+	}
+	for _, want := range []string{`"Ctrl-u": "Undo"`, `"Alt-/": "lua:comment.comment"`, `"CtrlUnderscore": "lua:comment.comment"`} {
+		if !strings.Contains(string(updatedBindings), want) {
+			t.Errorf("persisted Micro bindings are missing %q: %s", want, updatedBindings)
+		}
+	}
+	for path, want := range map[string][]byte{settingsPath: settings} {
 		got, err := os.ReadFile(path)
 		if err != nil || string(got) != string(want) {
 			t.Errorf("config file %s changed: %q (err %v)", path, got, err)
@@ -118,7 +129,7 @@ func TestMalformedCustomSyntaxReportsDiagnosticAndFallsBack(t *testing.T) {
 	}
 }
 
-func TestMissingColorschemeFailsBeforeTerminalInitialization(t *testing.T) {
+func TestMissingColorschemeFailsAndRestoresTerminal(t *testing.T) {
 	configDir := t.TempDir()
 	contents := []byte(`{"colorscheme":"does-not-exist"}`)
 	path := filepath.Join(configDir, "settings.json")
@@ -135,6 +146,9 @@ func TestMissingColorschemeFailsBeforeTerminalInitialization(t *testing.T) {
 	}
 	if got, err := os.ReadFile(path); err != nil || string(got) != string(contents) {
 		t.Fatalf("invalid colorscheme settings were changed: %q, %v", got, err)
+	}
+	if screen.Screen != nil {
+		t.Fatal("missing colorscheme left terminal initialized")
 	}
 }
 

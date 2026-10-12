@@ -70,6 +70,9 @@ type App struct {
 	quitFlow        *quitFlow
 	quitComplete    bool
 	diagnostic      string
+	microTab        *action.Tab
+	pluginTimers    chan func()
+	pluginStop      chan struct{}
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
@@ -96,13 +99,11 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 	config.Diagnostics = nil
 	config.DisableBufferStateWrites = true
 	config.InitRuntimeFiles(true)
+	config.InitPlugins()
 	if err := config.ReadSettings(); err != nil {
 		return nil, err
 	}
 	if err := config.InitGlobalSettings(); err != nil {
-		return nil, err
-	}
-	if err := config.InitColorscheme(); err != nil {
 		return nil, err
 	}
 	debounce, err := configuredDebounce(cliDebounceMS)
@@ -142,21 +143,50 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 		}
 		return nil, fmt.Errorf("initialize diff composition surface: %w", err)
 	}
+	app := &App{
+		focus:        viewport.Left,
+		terminal:     screen.Screen,
+		paintScreen:  paintScreen,
+		surface:      surface,
+		coordinator:  newDiffCoordinator(debounce, nil, nil),
+		pluginTimers: make(chan func(), 128),
+		pluginStop:   make(chan struct{}),
+	}
 	screen.Events = make(chan tcell.Event, 16)
 	action.Tabs = nil
 	action.InitGlobals()
+	screen.SetMessageHandler(func(message string) {
+		config.AddDiagnostic(message)
+		if action.InfoBar != nil {
+			action.InfoBar.Error(message)
+		}
+	})
+	initMicroLua(app)
+	pluginErr := config.LoadAllPlugins()
 	action.InitBindings() // Patched Micro helper reads bindings without creating one.
 	action.InitCommands()
+	if pluginErr != nil {
+		config.AddDiagnostic(pluginErr.Error())
+	}
+	for _, callback := range []string{"preinit", "init", "postinit"} {
+		if err := config.RunPluginFn(callback); err != nil {
+			config.AddDiagnostic(err.Error())
+		}
+	}
+	if err := config.InitColorscheme(); err != nil {
+		app.Close()
+		return nil, fmt.Errorf("load Micro colorscheme after plugin initialization: %w", err)
+	}
 
 	leftBuf, err := newPaneBuffer(paths, 0)
 	if err != nil {
-		cleanupFailedBuffers(paintScreen, surface, s)
+		app.Close()
 		return nil, fmt.Errorf("open left pane: %w", err)
 	}
 	rightBuf, err := newPaneBuffer(paths, 1)
 	if err != nil {
 		leftBuf.Close()
-		cleanupFailedBuffers(paintScreen, surface, s)
+		app.Close()
 		return nil, fmt.Errorf("open right pane: %w", err)
 	}
 	for _, b := range []*buffer.Buffer{leftBuf, rightBuf} {
@@ -164,17 +194,10 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 		b.Settings["diffgutter"] = false
 	}
 
-	app := &App{
-		left:        pane{buf: leftBuf},
-		right:       pane{buf: rightBuf},
-		pairs:       compare.Align([]string{""}, []string{""}),
-		focus:       viewport.Left,
-		terminal:    screen.Screen,
-		paintScreen: paintScreen,
-		surface:     surface,
-		coordinator: newDiffCoordinator(debounce, nil, nil),
-		diagnostic:  strings.Join(config.Diagnostics, "; "),
-	}
+	app.left.buf = leftBuf
+	app.right.buf = rightBuf
+	app.pairs = compare.Align([]string{""}, []string{""})
+	app.diagnostic = strings.Join(config.Diagnostics, "; ")
 	app.versions = DiffVersions{Left: leftBuf.ContentVersion(), Right: rightBuf.ContentVersion()}
 	app.displayedLeft, app.displayedRight = app.snapshots()
 	app.coordinator.AcceptCurrent(app.versions)
@@ -189,33 +212,6 @@ func newPaneBuffer(paths []string, side int) (*buffer.Buffer, error) {
 		return buffer.NewBufferFromFileUnshared(paths[side], buffer.BTDefault)
 	}
 	return buffer.NewBufferFromString("", "", buffer.BTDefault), nil
-}
-
-func cleanupFailedBuffers(paintScreen, surface tcell.SimulationScreen, terminal tcell.Screen) {
-	if action.InfoBar != nil {
-		action.InfoBar.Close()
-		action.InfoBar = nil
-	}
-	if buffer.LogBuf != nil {
-		buffer.LogBuf.Close()
-		buffer.LogBuf = nil
-	}
-	if paintScreen != nil {
-		paintScreen.Fini()
-	}
-	if surface != nil {
-		surface.Fini()
-	}
-	if terminal != nil {
-		terminal.Fini()
-		if screen.Screen == terminal {
-			screen.Screen = nil
-		}
-	}
-	if ulua.L != nil {
-		ulua.L.Close()
-		ulua.L = nil
-	}
 }
 
 func configuredDebounce(cliMS *int) (time.Duration, error) {
@@ -367,6 +363,17 @@ func (a *App) Close() {
 		return
 	}
 	a.closed = true
+	if ulua.L != nil {
+		if err := config.RunPluginFn("deinit"); err != nil {
+			config.AddDiagnostic(err.Error())
+		}
+	}
+	screen.SetMessageHandler(nil)
+	action.Tabs = nil
+	if a.pluginStop != nil {
+		close(a.pluginStop)
+		a.pluginStop = nil
+	}
 	if a.coordinator != nil {
 		a.coordinator.Close()
 	}
@@ -448,8 +455,20 @@ func (a *App) resize(cols, rows int) {
 			Buf:  p.buf,
 		}
 		p.statusView.SetActive((i == 0 && a.focus == viewport.Left) || (i == 1 && a.focus == viewport.Right))
-		p.h = action.NewBufPane(p.buf, p.view, nil)
+		p.h = action.NewBufPaneFromBuf(p.buf, nil)
+		p.h.BWindow = p.view
 	}
+	a.microTab = &action.Tab{}
+	a.microTab.Panes = []action.Pane{a.left.h, a.right.h}
+	a.left.h.SetTab(a.microTab)
+	a.right.h.SetTab(a.microTab)
+	a.microTab.SetActive(int(a.focus))
+	action.Tabs = &action.TabList{
+		TabWindow: display.NewTabWindow(cols, 0),
+		List:      []*action.Tab{a.microTab},
+	}
+	a.left.h.Resize(a.left.width, a.rows)
+	a.right.h.Resize(a.right.width, a.rows)
 	a.expandWithAnchor(anchor, a.displayedLeft, a.displayedRight)
 }
 
@@ -956,6 +975,9 @@ func (a *App) focusedPane() *pane {
 }
 
 func (a *App) setFocus() {
+	if a.microTab != nil {
+		a.microTab.SetActive(int(a.focus))
+	}
 	a.left.view.SetActive(a.focus == viewport.Left)
 	a.right.view.SetActive(a.focus == viewport.Right)
 	a.left.statusView.SetActive(a.focus == viewport.Left)
@@ -1335,6 +1357,12 @@ func RunWithSignals(ctx context.Context, a *App, events <-chan tcell.Event) erro
 		case result := <-a.coordinator.Results():
 			a.installDiff(result)
 			a.draw()
+		case callback := <-a.pluginTimers:
+			if callback != nil {
+				callback()
+				a.syncFocusedBuffer()
+				a.draw()
+			}
 		case event, ok := <-events:
 			if !ok {
 				return errors.New("event stream closed")

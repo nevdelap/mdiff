@@ -54,12 +54,18 @@ navigation keys remain reserved. Unsupported keybinding actions are reported in
 the status area. Micro's private-view `ScrollUp`, `ScrollDown`, `Center`,
 `Start`, `End`, `PageUp`, `PageDown`, `HalfPageUp`, and `HalfPageDown` actions
 are also rejected because mdiff has one shared diff-aware viewport. Lua plugins
-are not loaded yet.
+load from Micro's normal `init.lua` and `plug/` locations, and bundled Micro
+plugins run by default. Plugins can edit the focused pane and use Micro's Lua
+APIs. Operations that create extra tabs/panes or independent vertical views are
+reported as unavailable. Plugins are trusted Lua code and retain Micro's file,
+process, and network access; mdiff does not sandbox them.
 
-Malformed settings and an unavailable selected colorscheme stop startup before
-raw terminal mode. Invalid bindings or syntax are reported without rewriting the
-user's files. Explicit document saves and configured Micro backup/autosave
-options can still write document artifacts. See the observed support matrix in
+Malformed settings stop startup before raw terminal mode. The selected
+colorscheme is resolved after Micro plugins initialize so a plugin can provide
+it; an unavailable or malformed scheme aborts startup and restores the terminal.
+Invalid bindings or syntax are reported without rewriting the user's files.
+Explicit document saves and configured Micro backup/autosave options can still
+write document artifacts. See the observed support matrix in
 [`design_docs/micro_diff_editor.md`](design_docs/micro_diff_editor.md).
 
 ## Development

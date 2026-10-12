@@ -156,7 +156,7 @@ func TestSimulationEditingAlignmentScrollResize(t *testing.T) {
 	}
 
 	app.Close()
-	assertNoPersistedConfigFiles(t, configDir)
+	assertNoUnexpectedPersistedState(t, configDir)
 }
 
 func flushDiffForTest(t *testing.T, app *App) {

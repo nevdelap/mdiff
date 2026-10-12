@@ -79,7 +79,7 @@ func (p *Plugin) IsLoaded() bool {
 	if v, ok := GlobalSettings[p.Name]; ok {
 		return v.(bool) && p.Loaded
 	}
-	return true
+	return p.Loaded
 }
 
 // Plugins is a list of all detected plugins (enabled or disabled)
