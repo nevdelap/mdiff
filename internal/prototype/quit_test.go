@@ -86,11 +86,11 @@ func TestQuitNamesEachUnnamedPaneInItsSavePrompt(t *testing.T) {
 	if app.handle(key(tcell.KeyCtrlQ, 0, tcell.ModCtrl)) {
 		t.Fatal("quit completed before asking about modified panes")
 	}
-	if got := app.currentStatus(); !strings.Contains(got, "left pane (No name)") {
+	if got := app.currentStatus(); !strings.Contains(got, "No name (left pane)") {
 		t.Fatalf("first prompt does not identify the left pane: %q", got)
 	}
 	app.handle(key(tcell.KeyRune, 'n', tcell.ModNone))
-	if got := app.currentStatus(); !strings.Contains(got, "right pane (No name)") {
+	if got := app.currentStatus(); !strings.Contains(got, "No name (right pane)") {
 		t.Fatalf("second prompt does not identify the right pane: %q", got)
 	}
 	if !app.handle(key(tcell.KeyRune, 'n', tcell.ModNone)) || !app.quitComplete {

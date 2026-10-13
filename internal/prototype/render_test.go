@@ -1,11 +1,15 @@
 package prototype
 
 import (
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
+	"github.com/nevdelap/mdiff/internal/micro/display"
+	"github.com/nevdelap/mdiff/internal/micro/screen"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
@@ -78,7 +82,7 @@ func TestRenderCharacterDiffMapsTabsWideRunesAndCombiningMarks(t *testing.T) {
 		"diff-deleted": tcell.StyleDefault.Foreground(tcell.ColorRed),
 	})
 
-	leftCells := app.renderMicroLine(&app.left, 0)
+	leftCells := app.renderMicroLine(&app.left, 0, true)
 	textStart := app.left.view.BufView().X - app.left.x
 	if got := leftCells[0][textStart+1].sourceRune; got != 1 {
 		t.Fatalf("first tab cell maps to rune %d, want tab rune 1", got)
@@ -100,6 +104,52 @@ func TestRenderCharacterDiffMapsTabsWideRunesAndCombiningMarks(t *testing.T) {
 	_, _, tabAttrs := cellStyle(app.surface, textStart+1, 0)
 	if tabAttrs&tcell.AttrReverse != 0 {
 		t.Fatal("unchanged tab received a change style")
+	}
+}
+
+func TestVisibleWrappedRowRendererMatchesMicroViewportRows(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	text := strings.Repeat("wrapped words ", 12)
+	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, text)
+	if err := app.left.buf.SetOptionNative("softwrap", true); err != nil {
+		t.Fatal(err)
+	}
+	p := &app.left
+	wraps := app.wrapHeight(p, 0)
+	if wraps < 2 {
+		t.Fatalf("fixture has only %d wrapped rows", wraps)
+	}
+
+	view := p.view
+	x, y, width, height := view.X, view.Y, view.Width, view.Height
+	startLine, startCol, active := view.StartLine, view.StartCol, view.IsActive()
+	view.X, view.Y, view.Height = 0, 0, wraps+1
+	view.StartLine = display.SLoc{Line: 0}
+	view.SetActive(false)
+	previous := screen.Screen
+	app.paintScreen.Clear()
+	screen.Screen = app.paintScreen
+	view.Display()
+	fullRows := make([][]renderedCell, wraps)
+	for row := range fullRows {
+		fullRows[row] = make([]renderedCell, p.width)
+		for col := range fullRows[row] {
+			r, combc, style, cellWidth := app.paintScreen.GetContent(col, row)
+			fullRows[row][col] = renderedCell{rune: r, combc: append([]rune(nil), combc...), style: style, width: cellWidth, sourceRune: -1}
+		}
+	}
+	screen.Screen = previous
+	view.X, view.Y, view.Width, view.Height = x, y, width, height
+	view.StartLine, view.StartCol = startLine, startCol
+	view.Resize(width, height)
+	view.StartLine, view.StartCol = startLine, startCol
+	view.SetActive(active)
+
+	for row := 0; row < wraps; row++ {
+		if got := app.renderMicroRow(p, 0, row, false); !reflect.DeepEqual(got, fullRows[row]) {
+			t.Fatalf("rendered wrapped row %d differs from Micro's full-line render", row)
+		}
 	}
 }
 

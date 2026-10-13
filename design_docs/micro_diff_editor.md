@@ -981,6 +981,12 @@ that profile:
   all lines. Width/height map rebuild may be `O(N+M)` initially; measure before
   adding a tree structure.
 
+The measured TASK-009 benchmark environment, deterministic fixture definitions,
+latency ranges, allocations, RSS, and platform caveats are recorded in
+[`task_009_performance_report.md`](task_009_performance_report.md). The results
+are evidence for the implementation on its constrained test host, not a
+guarantee for every four-vCPU machine or terminal emulator.
+
 Use fixed adversarial benchmark inputs: 100,000 `repeat` lines versus a 50,000
 line prefix, one `changed` line, and a 50,000 line suffix; 50,000 unique
 `L%08d:%016x` records whose hex value is the next `Uint64` from Go

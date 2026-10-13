@@ -73,6 +73,15 @@ test-pty:
 test-race:
     go test -race ./...
 
+# Run deterministic performance fixtures; output stays outside the source tree.
+bench:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bench_out="${MDIFF_BENCH_OUT:-/tmp/mdiff-bench.txt}"
+    go test -run '^$' -bench='^(BenchmarkAlign|BenchmarkExpand|BenchmarkPaste|BenchmarkCached)' -benchtime=1x -benchmem -count=5 -v ./internal/compare ./internal/viewport ./internal/prototype | tee "$bench_out"
+    go test -run '^$' -bench='^BenchmarkRSSMemoryGate$' -benchtime=1x -benchmem -count=5 -v ./internal/compare | tee -a "$bench_out"
+    echo "benchmark report: $bench_out"
+
 # Build the mdiff command.
 build:
     go build -buildvcs=false ./cmd/mdiff

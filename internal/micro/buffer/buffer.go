@@ -525,7 +525,11 @@ func newBuffer(r io.Reader, size int64, path string, btype BufType, cmd Command,
 		} else if !hasBackup {
 			// since applying a backup does not save the applied backup to disk, we should
 			// not calculate the original hash based on the backup data
+			// UpdateRules may still be publishing its initial asynchronous highlight
+			// snapshot. Serialize the constructor's line read with that publication.
+			b.syntaxMu.Lock()
 			b.calcHash(&b.origHash)
+			b.syntaxMu.Unlock()
 		}
 	}
 

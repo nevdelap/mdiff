@@ -29,6 +29,14 @@ type BufWindow struct {
 	hasMessage       bool
 	maxLineNumLength int
 	drawDivider      bool
+	vlocCache        map[vlocCacheKey]VLoc
+}
+
+type vlocCacheKey struct {
+	version            uint64
+	line, x, width     int
+	tabSize            int
+	softwrap, wordwrap bool
 }
 
 // NewBufWindow creates a new window at a location in the screen with a width and height
@@ -182,23 +190,22 @@ func (w *BufWindow) getStartInfo(n, lineN int) ([]byte, int, int, *tcell.Style) 
 	for len(b) > 0 {
 		r, _, size := util.DecodeCharacter(b)
 
-		curStyle, found := w.getStyle(curStyle, bloc)
-		if found {
-			s = &curStyle
-		}
-
-		w := 0
+		charWidth := 0
 		switch r {
 		case '\t':
 			ts := tabsize - (width % tabsize)
-			w = ts
+			charWidth = ts
 		default:
-			w = runewidth.RuneWidth(r)
+			charWidth = runewidth.RuneWidth(r)
 		}
-		if width+w > n {
+		if width+charWidth > n {
+			curStyle, found := w.getStyle(curStyle, bloc)
+			if found {
+				s = &curStyle
+			}
 			return b, n - width, bloc.X, s
 		}
-		width += w
+		width += charWidth
 		b = b[size:]
 		bloc.X++
 	}

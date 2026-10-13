@@ -320,13 +320,30 @@ func (w *BufWindow) SLocFromLoc(loc buffer.Loc) SLoc {
 // VLocFromLoc takes a position in the buffer and returns the corresponding
 // visual location in the linewrapped buffer.
 func (w *BufWindow) VLocFromLoc(loc buffer.Loc) VLoc {
-	if !w.Buf.Settings["softwrap"].(bool) {
-		tabsize := util.IntOpt(w.Buf.Settings["tabsize"])
-
-		visualx := util.StringWidth(w.Buf.LineBytes(loc.Y), loc.X, tabsize)
-		return VLoc{SLoc{loc.Y, 0}, visualx}
+	tabSize := util.IntOpt(w.Buf.Settings["tabsize"])
+	softwrap := w.Buf.Settings["softwrap"].(bool)
+	wordwrap := softwrap && w.Buf.Settings["wordwrap"].(bool)
+	key := vlocCacheKey{
+		version: w.Buf.ContentVersion(), line: loc.Y, x: loc.X, width: w.bufWidth,
+		tabSize: tabSize, softwrap: softwrap, wordwrap: wordwrap,
 	}
-	return w.getVLocFromLoc(loc)
+	if cached, ok := w.vlocCache[key]; ok {
+		return cached
+	}
+	var result VLoc
+	if !softwrap {
+		visualx := util.StringWidth(w.Buf.LineBytes(loc.Y), loc.X, tabSize)
+		result = VLoc{SLoc{loc.Y, 0}, visualx}
+	} else {
+		result = w.getVLocFromLoc(loc)
+	}
+	if w.vlocCache == nil {
+		w.vlocCache = make(map[vlocCacheKey]VLoc)
+	} else if len(w.vlocCache) >= 4096 {
+		clear(w.vlocCache)
+	}
+	w.vlocCache[key] = result
+	return result
 }
 
 // LocFromVLoc takes a visual location in the linewrapped buffer and returns

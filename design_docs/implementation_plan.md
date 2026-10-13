@@ -1120,7 +1120,7 @@ Handoff:
 
 ### TASK-009 - Meet large-input performance and resource targets
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -1214,10 +1214,55 @@ Verification:
 - `just build`
 - `just bench`
 
+Implementation verification (2026-10-13): `just format`, `just lint`,
+`just test`, `just test-pty`, `just test-race`, `just build`, and `just bench`
+passed. The constrained reference benchmark run passed. It used Ubuntu 24.04
+Linux/amd64, Go 1.26.8, Docker `--cpus=4 --memory=8g`, and `GOMAXPROCS=4` on an
+AMD Ryzen 7 5700U host. Five-run medians were 213 ms for 1 MiB paste-to-visible
+draw, 1.56 s for the large-replacement coarse fallback, and 1.54 s for the
+unique-reversed coarse fallback. The 10 MiB RSS fixture peaked at 50.83 MiB. The
+host is a capped 16-logical-CPU machine, not a dedicated 4-vCPU reference VM;
+the performance report records this limit and the simulated-screen paste
+methodology.
+
 Handoff:
 
-- Record baseline and final results, any target changes, fallback thresholds,
-  cache invalidation rules, and evidence for every optimization retained.
+- Benchmark commands, inputs, generator versions, five-run ranges and medians,
+  allocations, RSS observations, environment limits, baseline profile, and
+  retained-optimization rationale are in
+  [`task_009_performance_report.md`](task_009_performance_report.md). No
+  performance target was revised.
+- The comparator uses a 1.5 s shared comparison budget and displays a coarse
+  changed region plus a status warning when that budget is exhausted. Measured
+  adversarial fallbacks returned in under 1.6 s in the reference container.
+- Per-line geometry cache keys include stable line identity, content version,
+  pane width, tab size, and wrap mode. Single-range edits invalidate affected
+  lines while preserving unchanged line identities; geometry changes invalidate
+  entries using the old width/tab/wrap inputs. The bounded Micro visual-location
+  cache is content-versioned and capped at 4,096 entries.
+- Large paste profiling found repeated syntax style lookup during cursor visual
+  position calculation, full wrapped-line expansion, byte-at-a-time line-array
+  insertion, and redundant syntax-rule refreshes. The documented changes removed
+  those measured costs; final paste-to-visible median was 214 ms versus about
+  500 ms and 1.07 million allocations in the initial profile.
+- No incremental diff data structure was justified by these results. Review
+  scope is the benchmark and cache behavior, fallback semantics, bulk line
+  insertion, and visible-row rendering optimizations.
+- The race gate found that construction could hash line storage while
+  asynchronous syntax highlighting published line metadata. The constructor now
+  takes the existing syntax mutex around that initial hash read. The full race
+  suite passed after this synchronization fix.
+- Rufus review pass 1 found that replacing a pane buffer could reuse the old
+  buffer's line-height identities. `syncPaneBuffer` now resets the affected
+  side's line IDs and removes its stale cache entries. The regression test
+  `TestSyncPaneBufferResetsLineHeightCacheOnReplacement` verifies a cached
+  multi-row line is replaced by a one-row line at the same index and geometry,
+  and that the rebuilt aligned layout contains one row. Resolved and approved in
+  Rufus review pass 2.
+- The pane Micro status lines now display the same `│` divider as the editing
+  panes, filling their center gap.
+  `TestShortcutBarHelpCommandAndRejectedActions` asserts the divider is present
+  at the split column.
 
 ### TASK-010 - Complete release readiness and platform verification
 

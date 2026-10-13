@@ -87,10 +87,10 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 
 	quitStart := transcript.mark()
 	writePTY(t, terminal, []byte{0x11}) // Ctrl-Q prompts for each modified unnamed buffer.
-	transcript.waitForScreenSince(t, quitStart, "left pane (No name)")
+	transcript.waitForScreenSince(t, quitStart, "Save changes to No name (left pane)")
 	writePTY(t, terminal, []byte{'n'})
 	secondQuitPrompt := transcript.mark()
-	transcript.waitForScreenSince(t, secondQuitPrompt, "right pane (No name)")
+	transcript.waitForScreenSince(t, secondQuitPrompt, "Save changes to No name (right pane)")
 	writePTY(t, terminal, []byte{'n'}) // Discard both and exit.
 	waitProcess(t, cmd)
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
@@ -282,11 +282,11 @@ func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
 	transcript.waitFor(t, []byte("^Q Quit"))
 	writePTY(t, terminal, []byte("\x1b[200~UNNAMED-EDIT\n\x1b[201~"))
 	writePTY(t, terminal, []byte{0x11}) // Ctrl+Q asks about the unnamed buffer.
-	transcript.waitForScreenSince(t, 0, "Save changes to left pane (No name)")
+	transcript.waitForScreenSince(t, 0, "Save changes to No name (left pane)")
 	writePTY(t, terminal, []byte{0x11}) // Micro's command prompt binding cancels.
 	secondPrompt := transcript.mark()
 	writePTY(t, terminal, []byte{0x11})
-	transcript.waitForScreenSince(t, secondPrompt, "Save changes to left pane (No name)")
+	transcript.waitForScreenSince(t, secondPrompt, "Save changes to No name (left pane)")
 	writePTY(t, terminal, []byte{'y'})
 	transcript.waitForScreenSince(t, 0, "Filename:")
 	writePTY(t, terminal, []byte(savePath))

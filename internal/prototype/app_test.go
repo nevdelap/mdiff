@@ -175,6 +175,39 @@ func flushDiffForTest(t *testing.T, app *App) {
 	}
 }
 
+func TestSyncPaneBufferResetsLineHeightCacheOnReplacement(t *testing.T) {
+	app, _ := newEditingTestApp(t, 80, 12)
+	defer app.Close()
+
+	p := &app.left
+	if err := p.buf.SetOptionNative("softwrap", true); err != nil {
+		t.Fatal(err)
+	}
+	p.buf.Insert(buffer.Loc{X: 0, Y: 0}, strings.Repeat("x", p.view.Width*3))
+	app.rebuildWithAnchor(anchor{})
+	if height := app.wrapHeight(p, 0); height < 2 {
+		t.Fatalf("cached long line height = %d, want multiple rows", height)
+	}
+	if len(app.layout.Rows) < 2 {
+		t.Fatalf("long line produced %d aligned rows, want multiple", len(app.layout.Rows))
+	}
+
+	replacement := buffer.NewBufferFromString("short", "", buffer.BTDefault)
+	if err := replacement.SetOptionNative("softwrap", true); err != nil {
+		t.Fatal(err)
+	}
+	p.h.OpenBuffer(replacement)
+	app.syncPaneBuffer(p)
+	app.rebuildWithAnchor(anchor{})
+
+	if height := app.wrapHeight(p, 0); height != 1 {
+		t.Fatalf("replacement line reused stale cached height %d, want 1", height)
+	}
+	if len(app.layout.Rows) != 1 {
+		t.Fatalf("replacement layout has %d aligned rows, want 1", len(app.layout.Rows))
+	}
+}
+
 func TestLargePasteStaysResponsiveAndInstallsFinalAlignment(t *testing.T) {
 	sim := tcell.NewSimulationScreen("")
 	if err := sim.Init(); err != nil {

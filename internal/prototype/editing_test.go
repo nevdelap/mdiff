@@ -235,6 +235,10 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	}
 	leftStatus := screenLine(sim, app.left.statusView.Y, app.left.width)
 	rightStatus := screenLine(sim, app.right.statusView.Y, app.right.width)
+	separator, _, _, _ := sim.GetContent(app.left.width, app.rows)
+	if separator != '│' {
+		t.Fatalf("pane status separator = %q, want vertical divider", separator)
+	}
 	for side, line := range []string{leftStatus, rightStatus} {
 		for _, field := range []string{"No name", "(1,1)", "ft:unknown", "unix", "utf-8"} {
 			if !strings.Contains(strings.ToLower(line), strings.ToLower(field)) {

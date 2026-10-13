@@ -27,6 +27,7 @@ type diffSnapshot struct {
 type diffResult struct {
 	snapshot diffSnapshot
 	pairs    []compare.Pair
+	coarse   bool
 	err      error
 }
 
@@ -71,11 +72,6 @@ func newDiffCoordinator(delay time.Duration, clock diffClock, compareFn diffComp
 	}
 	if clock == nil {
 		clock = realDiffClock{}
-	}
-	if compareFn == nil {
-		compareFn = func(left, right []string) ([]compare.Pair, error) {
-			return compare.Align(left, right), nil
-		}
 	}
 	return &diffCoordinator{
 		clock: clock, compare: compareFn, baseDelay: delay,
@@ -147,13 +143,18 @@ func (c *diffCoordinator) TimerC() <-chan time.Time {
 
 // DebounceElapsed captures must be made by the caller on the app goroutine.
 func (c *diffCoordinator) DebounceElapsed(snapshot diffSnapshot) {
+	c.DebounceElapsedOwned(cloneSnapshot(snapshot))
+}
+
+// DebounceElapsedOwned transfers the caller's detached snapshot slices to the
+// coordinator. The caller must not mutate them after this call.
+func (c *diffCoordinator) DebounceElapsedOwned(snapshot diffSnapshot) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || !c.dirty {
 		return
 	}
 	c.dirty = false
-	snapshot = cloneSnapshot(snapshot)
 	if c.active {
 		c.pending = &snapshot
 		return
@@ -166,8 +167,14 @@ func (c *diffCoordinator) startLocked(snapshot diffSnapshot) {
 	done := make(chan struct{})
 	c.activeDone = done
 	go func() {
-		pairs, err := c.compare(snapshot.left, snapshot.right)
-		c.results <- diffResult{snapshot: snapshot, pairs: pairs, err: err}
+		var result diffResult
+		result.snapshot = snapshot
+		if c.compare == nil {
+			result.pairs, result.coarse = compare.AlignWithBudget(snapshot.left, snapshot.right, compare.DefaultBudget)
+		} else {
+			result.pairs, result.err = c.compare(snapshot.left, snapshot.right)
+		}
+		c.results <- result
 		close(done)
 	}()
 }

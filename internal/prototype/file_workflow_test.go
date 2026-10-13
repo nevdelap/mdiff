@@ -338,7 +338,7 @@ func TestOpenModifiedBufferPromptsAndCancelKeepsExistingDocument(t *testing.T) {
 		app.handle(key(tcell.KeyRune, r, tcell.ModNone))
 	}
 	app.handle(key(tcell.KeyEnter, 0, tcell.ModNone))
-	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "Save changes to left pane (No name)") {
+	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "Save changes to No name (left pane)") {
 		t.Fatalf("modified Open did not prompt to save changes: %q", app.currentStatus())
 	}
 	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))

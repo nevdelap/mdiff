@@ -72,6 +72,7 @@ type App struct {
 	focus            viewport.Side
 	closed           bool
 	coordinator      *diffCoordinator
+	lineHeights      *lineHeightCache
 	versions         DiffVersions
 	layoutVersions   DiffVersions
 	pairs            []compare.Pair
@@ -80,6 +81,7 @@ type App struct {
 	pendingAnchor    anchor
 	hasPendingAnchor bool
 	diffErr          error
+	diffWarning      string
 	handlingPaste    bool
 	blockedSequence  string
 	quitFlow         *quitFlow
@@ -211,6 +213,7 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 
 	app.left.buf = leftBuf
 	app.right.buf = rightBuf
+	app.lineHeights = newLineHeightCache(leftBuf.LinesNum(), rightBuf.LinesNum())
 	app.pairs = compare.Align([]string{""}, []string{""})
 	app.diagnostic = strings.Join(config.Diagnostics, "; ")
 	app.versions = DiffVersions{Left: leftBuf.ContentVersion(), Right: rightBuf.ContentVersion()}
@@ -267,6 +270,11 @@ func resolveDebounce(settings map[string]any, cliMS *int) (time.Duration, error)
 }
 
 func (a *App) textChanged(side viewport.Side, change buffer.TextChange) {
+	lineCount := a.left.buf.LinesNum()
+	if side == viewport.Right {
+		lineCount = a.right.buf.LinesNum()
+	}
+	a.lineHeights.change(side, change.Ranges, lineCount)
 	if !a.hasPendingAnchor {
 		a.pendingAnchor = a.captureAnchor()
 		a.hasPendingAnchor = a.pendingAnchor.valid
@@ -316,7 +324,7 @@ func (a *App) installDiff(result diffResult) {
 	if !current {
 		if restartNow {
 			left, right := a.snapshots()
-			a.coordinator.DebounceElapsed(diffSnapshot{left: left, right: right, versions: a.versions})
+			a.coordinator.DebounceElapsedOwned(diffSnapshot{left: left, right: right, versions: a.versions})
 		}
 		return
 	}
@@ -326,9 +334,15 @@ func (a *App) installDiff(result diffResult) {
 	}
 	currentAnchor := a.captureAnchorForSnapshot(completed.snapshot.left, completed.snapshot.right)
 	a.pairs = completed.pairs
-	a.displayedLeft = append([]string(nil), completed.snapshot.left...)
-	a.displayedRight = append([]string(nil), completed.snapshot.right...)
+	// The result snapshot is detached and immutable; transfer its slices into
+	// the displayed state instead of copying every line header again.
+	a.displayedLeft = completed.snapshot.left
+	a.displayedRight = completed.snapshot.right
 	a.expandWithAnchor(currentAnchor, completed.snapshot.left, completed.snapshot.right)
+	a.diffWarning = ""
+	if completed.coarse {
+		a.diffWarning = "Diff budget reached; showing coarse changed region"
+	}
 	a.hasPendingAnchor = false
 	a.pendingAnchor = anchor{}
 	a.layoutVersions = completed.snapshot.versions
@@ -544,8 +558,17 @@ func (a *App) wrapHeight(p *pane, line int) int {
 	if line < 0 || line >= p.buf.LinesNum() || p.view == nil {
 		return 1
 	}
-	end := len([]rune(p.buf.Line(line)))
-	return p.view.VLocFromLoc(buffer.Loc{X: end, Y: line}).Row + 1
+	tabSize, _ := p.buf.Settings["tabsize"].(float64)
+	softwrap, _ := p.buf.Settings["softwrap"].(bool)
+	wordwrap, _ := p.buf.Settings["wordwrap"].(bool)
+	side := viewport.Left
+	if p.x != 0 {
+		side = viewport.Right
+	}
+	return a.lineHeights.height(side, line, p.view.Width, int(tabSize), softwrap, wordwrap, func() int {
+		end := len([]rune(p.buf.Line(line)))
+		return p.view.VLocFromLoc(buffer.Loc{X: end, Y: line}).Row + 1
+	})
 }
 
 type anchor struct {
@@ -721,7 +744,6 @@ func (a *App) handle(event tcell.Event) bool {
 			a.blockedSequence = ""
 			p := a.focusedPane()
 			p.h.SaveWithExternalChangeCheck("Save", nil)
-			p.buf.UpdateRules()
 			return false
 		}
 		if e.Key() == tcell.KeyCtrlT {
@@ -751,7 +773,6 @@ func (a *App) handle(event tcell.Event) bool {
 		}
 		p := a.focusedPane()
 		p.h.HandleEvent(e)
-		p.buf.UpdateRules()
 		a.ensureCursorVisible()
 	case *tcell.EventPaste:
 		a.blockedSequence = ""
@@ -763,7 +784,6 @@ func (a *App) handle(event tcell.Event) bool {
 		a.handlingPaste = true
 		p.h.HandleEvent(e)
 		a.handlingPaste = false
-		p.buf.UpdateRules()
 		a.ensureCursorVisible()
 	}
 	return false
@@ -775,7 +795,6 @@ func (a *App) handlePromptEvent(event tcell.Event) {
 	}
 	action.InfoBar.HandleEvent(event)
 	a.syncFocusedBuffer()
-	a.focusedPane().buf.UpdateRules()
 	a.ensureCursorVisible()
 	if a.quitFlow != nil && a.quitFlow.awaitingSave && (action.InfoBar == nil || !action.InfoBar.HasPrompt) {
 		a.quitFlow = nil
@@ -794,11 +813,15 @@ func (a *App) requestQuit() bool {
 }
 
 func (a *App) panePromptName(p *pane) string {
-	side := "left"
+	return fmt.Sprintf("%s (%s)", filepath.Base(p.buf.GetName()), a.paneSideName(p))
+}
+
+func (a *App) paneSideName(p *pane) string {
+	side := "left pane"
 	if p == &a.right {
-		side = "right"
+		side = "right pane"
 	}
-	return fmt.Sprintf("%s pane (%s)", side, filepath.Base(p.buf.GetName()))
+	return side
 }
 
 func (a *App) advanceQuitDecisions(flow *quitFlow) {
@@ -896,6 +919,7 @@ func (a *App) syncPaneBuffer(p *pane) {
 	if p == &a.right {
 		side = viewport.Right
 	}
+	a.lineHeights.reset(side, p.buf.LinesNum())
 	p.buf.SetChangeHandler(func(change buffer.TextChange) { a.textChanged(side, change) })
 	p.buf.UpdateRules()
 }
@@ -978,7 +1002,6 @@ func (a *App) openCommandBar() {
 			return
 		}
 		p.h.HandleCommand(input)
-		p.buf.UpdateRules()
 		a.ensureCursorVisible()
 	})
 }
@@ -1040,8 +1063,8 @@ func (a *App) rebuildWithAnchor(previous anchor) {
 		}
 	}
 	a.pairs = compare.Align(left, right)
-	a.displayedLeft = append([]string(nil), left...)
-	a.displayedRight = append([]string(nil), right...)
+	a.displayedLeft = left
+	a.displayedRight = right
 	a.expandWithAnchor(previous, left, right)
 	a.hasPendingAnchor = false
 	a.pendingAnchor = anchor{}
@@ -1345,6 +1368,9 @@ func (a *App) draw() {
 	if a.diffErr != nil {
 		status = "Diff error: " + a.diffErr.Error() + " | " + status
 	}
+	if a.diffWarning != "" {
+		status = a.diffWarning + " | " + status
+	}
 	if action.InfoBar != nil && (action.InfoBar.HasMessage || action.InfoBar.HasError) {
 		status = action.InfoBar.Msg + " | " + status
 	}
@@ -1358,6 +1384,7 @@ func (a *App) draw() {
 		for _, p := range a.panes() {
 			display.NewStatusLine(p.statusView).Display()
 		}
+		screen.SetContent(a.left.width, a.rows, '│', nil, config.DefStyle)
 		menuStyle := microMenuStyle()
 		a.renderMenuLine(a.menuRow1, a.shortcutBar(0), a.focusNameIndicator(), menuStyle)
 		a.renderMenuLine(a.menuRow2, a.shortcutBar(1), "mdiff (wrapping micro) "+version.Version, menuStyle)
@@ -1568,7 +1595,7 @@ func RunWithSignals(ctx context.Context, a *App, events <-chan tcell.Event) erro
 			// Capture snapshots on the application goroutine. Workers receive only
 			// detached strings and version numbers.
 			left, right := a.snapshots()
-			a.coordinator.DebounceElapsed(diffSnapshot{left: left, right: right, versions: a.versions})
+			a.coordinator.DebounceElapsedOwned(diffSnapshot{left: left, right: right, versions: a.versions})
 			a.draw()
 		case result := <-a.coordinator.Results():
 			a.installDiff(result)

@@ -208,21 +208,39 @@ func (la *LineArray) insert(pos Loc, value []byte) {
 	defer la.lock.Unlock()
 
 	x, y := runeToByteIndex(pos.X, la.lines[pos.Y].data), pos.Y
-	for i := 0; i < len(value); i++ {
-		if value[i] == '\n' || (value[i] == '\r' && i < len(value)-1 && value[i+1] == '\n') {
+	for start := 0; start < len(value); {
+		end := start
+		for end < len(value) && value[end] != '\n' && !(value[end] == '\r' && end < len(value)-1 && value[end+1] == '\n') {
+			end++
+		}
+		if end > start {
+			la.insertBytes(Loc{x, y}, value[start:end])
+			x += end - start
+		}
+		if end < len(value) {
 			la.split(Loc{x, y})
 			x = 0
 			y++
-
-			if value[i] == '\r' {
-				i++
+			start = end + 1
+			if value[end] == '\r' {
+				start++
 			}
-
-			continue
+		} else {
+			start = end
 		}
-		la.insertByte(Loc{x, y}, value[i])
-		x++
 	}
+}
+
+// insertBytes shifts the remainder of a line once for the whole input segment.
+func (la *LineArray) insertBytes(pos Loc, value []byte) {
+	if len(value) == 0 {
+		return
+	}
+	line := &la.lines[pos.Y].data
+	oldLen := len(*line)
+	*line = append(*line, make([]byte, len(value))...)
+	copy((*line)[pos.X+len(value):], (*line)[pos.X:oldLen])
+	copy((*line)[pos.X:], value)
 }
 
 // InsertByte inserts a byte at a given location
