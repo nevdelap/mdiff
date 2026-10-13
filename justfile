@@ -4,6 +4,10 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 UV_CACHE_DIR := "/tmp/mdiff-uv-cache"
 UV_TOOL_DIR := "/tmp/mdiff-uv-tools"
 GOLANGCI_LINT_VERSION := "v2.14.0"
+GOVULNCHECK_VERSION := "v1.1.4"
+GO_LICENSES_VERSION := "v2.0.1"
+GO_AUDIT_TOOLCHAIN := "go1.26.9"
+AUDIT_TOOL_DIR := "/tmp/mdiff-audit-tools"
 APP_PACKAGES := "./cmd/mdiff ./internal/compare ./internal/prototype ./internal/viewport"
 
 # Show available recipes when Just is invoked without a recipe.
@@ -72,6 +76,23 @@ test-pty:
 # Run Go tests with the race detector.
 test-race:
     go test -race ./...
+
+# Check Go dependencies for known vulnerabilities and forbidden/unknown licenses.
+audit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export GOTOOLCHAIN={{ GO_AUDIT_TOOLCHAIN }}
+    export GOFLAGS=-buildvcs=false
+    mkdir -p {{ AUDIT_TOOL_DIR }}
+    if [[ ! -x "{{ AUDIT_TOOL_DIR }}/govulncheck" ]]; then
+        GOBIN={{ AUDIT_TOOL_DIR }} go install golang.org/x/vuln/cmd/govulncheck@{{ GOVULNCHECK_VERSION }}
+    fi
+    if [[ ! -x "{{ AUDIT_TOOL_DIR }}/go-licenses" ]]; then
+        GOBIN={{ AUDIT_TOOL_DIR }} go install github.com/google/go-licenses/v2@{{ GO_LICENSES_VERSION }}
+    fi
+    {{ AUDIT_TOOL_DIR }}/govulncheck ./...
+    GOTOOLCHAIN=local {{ AUDIT_TOOL_DIR }}/go-licenses check --include_tests ./...
+    GOTOOLCHAIN=local {{ AUDIT_TOOL_DIR }}/go-licenses report --include_tests ./...
 
 # Run deterministic performance fixtures; output stays outside the source tree.
 bench:

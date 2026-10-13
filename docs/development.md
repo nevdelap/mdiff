@@ -8,6 +8,7 @@
 - Docker for Markdown linting
 - `yamlfmt` and `yamllint` containers for workflow YAML quality checks
 - `golangci-lint` v2.14.0 for Go linting
+- Go 1.26.9 for the pinned vulnerability audit
 
 Install Go dependencies with:
 
@@ -44,6 +45,7 @@ Run the standard Go tests and build with:
 ```sh
 just test
 just build
+just audit
 ```
 
 The full local gate is:
@@ -82,6 +84,26 @@ cache misses and dependency downloads.
 `check.log` contains output from quiet recipes such as `just qcheck`. Read it
 when a quiet check fails.
 
+## Dependency maintenance
+
+Check the module graph for available releases with `go list -m -u all`. Run
+`go mod tidy -diff` to verify that `go.mod` and `go.sum` contain no unused
+requirements or missing checksums. Update one or more compatible modules, then
+run `just check` and `just audit`; inspect both module files and the license
+report before handoff. `just audit` installs the pinned govulncheck v1.1.4 and
+go-licenses v2.0.1 tools into `/tmp/mdiff-audit-tools`, checks reachable
+vulnerabilities and forbidden or unknown dependency licenses, and prints a
+license inventory. It uses Go 1.26.9 so the audit itself does not run against
+the vulnerable Go 1.26.8 standard library. The Go source minimum remains the
+version in `go.mod`.
+
+`github.com/micro-editor/tcell/v2` is intentionally pinned at v2.0.13. The
+vendored Micro source calls APIs removed in tcell v2.1.0 and later, including
+raw escape registration, paste-mode controls, raw events, and terminal clipboard
+methods. The Go module dependency graph and terminal integration tests are the
+compatibility gate for that pin. Dependabot ignores tcell v2.1.0 and later until
+the vendored Micro adapter is migrated and validated.
+
 ## Repository workflow
 
 This checkout uses Jujutsu. Use `jj` for repository status, history, and diffs
@@ -99,6 +121,9 @@ are documented in [roles.md](roles.md) and
 
 ## Continuous integration
 
-The CI workflow runs formatting and lint checks, `go test`, `go vet`, and a
-build on Linux and macOS with the minimum supported and current Go release
-lines. The same commands are available locally through `just`.
+The CI workflow runs formatting and lint checks, `go test`, PTY checks,
+`go vet`, and a build on Linux and macOS with the minimum supported and current
+Go release lines. Separate Linux/macOS jobs run the dependency audit and build
+the release executable twice on each same runner, requiring byte-identical
+outputs and recording the artifact SHA-256 in the workflow summary. The same
+commands are available locally through `just`.

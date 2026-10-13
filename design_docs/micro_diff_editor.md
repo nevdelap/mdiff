@@ -41,7 +41,7 @@ real Micro editing behavior and avoids a process boundary, while keeping Micro
 changes reviewable and upstream synchronization possible. The initial prototype
 must test this choice before the rest of the design is committed.
 
-For line diffing, use Micro's already-declared
+For logical-line alignment, use Micro's already-declared
 `github.com/sergi/go-diff/diffmatchpatch` dependency at line granularity. It is
 an established Go implementation already used in Micro's buffer code. Convert
 its operation stream into an immutable alignment map; do not use Micro's
@@ -76,8 +76,9 @@ Git-specific workflow is required.
   directory where their behavior is compatible with this application.
 - Accept terminal-native paste in either focused pane and retain independently
   editable buffers.
-- Continuously show line-level additions, deletions, and replacements, using
-  virtual rows for unmatched lines without changing either text buffer.
+- Show line additions, deletions, and replacements with character-level spans
+  inside changed lines. Use virtual rows for unmatched lines without changing
+  either text buffer.
 - Keep both panes aligned under scrolling, cursor navigation, difference
   navigation, mouse wheel input, wrapping, and terminal resize.
 - Use Micro's file lifecycle for each pane, including per-pane filenames,
@@ -398,8 +399,8 @@ A separate process running stock `micro` cannot satisfy the integration
 contract: its buffers, actions, panes, styles, and renderer are not exported as
 a stable embedding API, and terminal output from another process cannot provide
 accurate virtual alignment. A new TUI built from scratch would reproduce
-substantial editor behavior and still would not load Micro Lua plugins
-compatibly.
+substantial editor behavior and would need a second implementation of Micro's
+plugin host APIs to offer comparable Lua plugin behavior.
 
 A Go module cannot import `github.com/zyedidia/micro/v2/internal/...` from an
 unrelated module. Copying or vendoring those files under the original import
@@ -1119,16 +1120,16 @@ integration commitment.
 
 ### Phase 1: Integration and scroll prototype (complete in TASK-002)
 
-The completed prototype is documented in
+The original TASK-002 prototype is documented in
 [`micro_integration_prototype.md`](micro_integration_prototype.md). It has two
 empty transient Micro buffers, one tcell terminal, virtual spacers, shared
 visual rows, cursor rendering, bracketed paste, and resize coverage. A review
 found and fixed the terminal cursor handoff, with simulation and PTY regressions
-for its real terminal position. Character-level diffing is also required
-follow-up work; this prototype compares lines only. The exit gate passed for the
-shared-row architecture without replacing most of `BufWindow`. The remaining
-phases extend this proof with versioned diffing, character-span rendering,
-broader configuration compatibility, performance work, and release readiness.
+for its real terminal position. Character-level diffing was follow-up work at
+that milestone; TASK-003 later added character-span rendering. The exit gate
+passed for the shared-row architecture without replacing most of `BufWindow`.
+Later tasks added versioned diffing, broader configuration and plugin support,
+per-pane file workflows, performance work, and release checks.
 
 ### Phase 2: Character diff and responsive comparison (TASK-003–TASK-004)
 

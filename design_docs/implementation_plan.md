@@ -1266,7 +1266,7 @@ Handoff:
 
 ### TASK-010 - Complete release readiness and platform verification
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -1334,7 +1334,8 @@ Acceptance criteria:
   are verified. File writes occur through Micro-compatible explicit save and
   configured persistence behavior; configuration files are not rewritten.
 - The complete `just check` gate passes on a clean working copy and the release
-  notes list known limitations, including disabled-by-default trusted plugins.
+  notes list known limitations, including the fact that trusted Lua plugins are
+  not sandboxed and some Micro host operations are unavailable.
 
 Verification:
 
@@ -1346,7 +1347,60 @@ Verification:
 
 Handoff:
 
-- Record CI run links or job identifiers, release build hashes, license audit
-  results, known compatibility limits, and final acceptance evidence. Rufus
-  performs the release-readiness review and marks TASK-010 `COMPLETED` only
-  after all criteria pass.
+- Local verification passed on 2026-10-13: `just format`, `just check`,
+  `just test-pty`, `just audit`, and `go mod tidy -diff`. Go 1.26.9 is pinned
+  for audit/release verification; `go-licenses` reports the root project and
+  vendored Micro as MIT, with all dependency licenses classified. Its only
+  warnings are that `golang.org/x/sys/unix` contains assembly it cannot inspect
+  and that this untagged working revision maps to `HEAD` in the generated URL.
+
+- `govulncheck v1.1.4` reported no reachable vulnerabilities against Go 1.26.9.
+  The source was upgraded to current compatible direct/active indirect module
+  versions and `go mod tidy -diff` is clean. `github.com/micro-editor/tcell/v2`
+  remains at v2.0.13 because v2.1.0 and later remove APIs used by the pinned
+  Micro source; Dependabot ignores that incompatible range.
+
+- Two release builds from the same local Linux amd64 revision compared equal: Go
+  `go1.26.9 linux/amd64`, revision `2e7ba4680386c2094a6a745959a650d1d120f7c9`,
+  SHA-256 `58c6175ad64c84c243b2993eca1d2b764a245a922971073eaef54b2150b671b9`.
+  This was a local NixOS host, not the required Ubuntu 24.04 runner.
+
+- [CI run 38343952917](https://github.com/nevdelap/mdiff/actions/runs/38343952917)
+  passed the Ubuntu 24.04 jobs, dependency audit, quality job, and both
+  reproducible release builds. The macOS 15 test jobs failed because the PTY
+  resize test accepted `R04`, which was already on screen, before the redraw
+  finished. The test now waits for the menu on its new row and the cursor in the
+  resized right pane. Local `just --no-deps test` and `just --no-deps test-pty`
+  pass.
+
+- [CI retest 38344783009](https://github.com/nevdelap/mdiff/actions/runs/38344783009)
+  passed all eight jobs on revision `5b042d733a51a57402fc32045f40d0f8b1857408`,
+  including PTY checks on Ubuntu 24.04 and macOS 15 with Go 1.26.x and 1.27.x,
+  quality checks, and dependency audit. The same-runner release builds used
+  `go1.26.9` and
+  `go build -buildvcs=false -trimpath -ldflags="-s -w" -o <tmp>/mdiff ./cmd/mdiff`
+  twice per runner, with `cmp` equality. Verified SHA-256 values:
+
+  | Runner/target                | SHA-256                                                            |
+  | ---------------------------- | ------------------------------------------------------------------ |
+  | Ubuntu 24.04 / `linux/amd64` | `99ea3d8acfd711aa1cc1ad52c27e30323ca6bdc779c5f18fba1ae3d8f7b13d50` |
+  | macOS 15 / `darwin/arm64`    | `c2c7d6dde0c305d5f9db1c84769cbab7c5bbdc83528f8a5f58ea25f0cfbc24c9` |
+
+- [Follow-up CI run 38345016823](https://github.com/nevdelap/mdiff/actions/runs/38345016823)
+  exposed a second PTY test race on Ubuntu 24.04 with Go 1.26.x: a screen
+  checkpoint could split an ANSI escape sequence, causing the test's terminal
+  decoder to miss the next quit prompt. The decoder now processes the full
+  transcript in one stream. The targeted PTY scenario passed eight consecutive
+  local runs after this correction.
+
+- [CI run 38345278723](https://github.com/nevdelap/mdiff/actions/runs/38345278723)
+  passed all eight jobs on the reviewed candidate revision
+  `aea963bfceb099286633841ffd684b2d665b7d21`, including Ubuntu 24.04 and macOS
+  15 PTY checks, both Go test matrix versions, quality checks, and dependency
+  audit. Both same-runner release comparisons passed with Go `go1.26.9`:
+  `linux/amd64` SHA-256
+  `99ea3d8acfd711aa1cc1ad52c27e30323ca6bdc779c5f18fba1ae3d8f7b13d50` and
+  `darwin/arm64` SHA-256
+  `c2c7d6dde0c305d5f9db1c84769cbab7c5bbdc83528f8a5f58ea25f0cfbc24c9`.
+
+- TASK-010 was approved by Rufus review pass 3 and moved to `COMPLETED`.

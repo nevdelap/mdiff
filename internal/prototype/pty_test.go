@@ -80,10 +80,9 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	if err := pty.Setsize(terminal, &pty.Winsize{Rows: 12, Cols: 60}); err != nil {
 		t.Fatal(err)
 	}
-	resized := transcript.waitForScreenSince(t, resizeStart, "R04")
-	if !hasVisibleCursorWithin(resized[resizeStart:], 12, 60) {
-		t.Fatalf("resize redraw did not place a visible cursor inside the new terminal bounds; cursor sequences=%q output tail=%q", cursorPositionBeforeShow.FindAllSubmatch(resized[resizeStart:], -1), tail(resized[resizeStart:], 500))
-	}
+	// R04 was already visible before the resize. Wait for the menu to move
+	// to its new row and the cursor to return to the resized right pane.
+	transcript.waitForResizeRedraw(t, resizeStart, 10, 1, 8, 31, 60)
 
 	quitStart := transcript.mark()
 	writePTY(t, terminal, []byte{0x11}) // Ctrl-Q prompts for each modified unnamed buffer.
@@ -404,6 +403,27 @@ func (p *ptyTranscript) waitForCursorInColumnSince(t *testing.T, start, minCol, 
 	}
 }
 
+func (p *ptyTranscript) waitForResizeRedraw(t *testing.T, start, menuRow, minRow, maxRow, minCol, maxCol int) {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		p.mu.Lock()
+		data := append([]byte(nil), p.data...)
+		p.mu.Unlock()
+		if start <= len(data) && screenContainsAtRow(data, menuRow, "^Q Quit") && lastCursorPositionWithin(data[start:], minRow, maxRow, minCol, maxCol) && cursorRemainsVisible(data) {
+			return
+		}
+		select {
+		case <-p.changed:
+		case <-p.done:
+			t.Fatalf("PTY closed before resize redrew the menu and placed a visible cursor in rows %d..%d, columns %d..%d", minRow, maxRow, minCol, maxCol)
+		case <-timer.C:
+			t.Fatalf("timed out waiting for resize redraw and cursor in rows %d..%d, columns %d..%d; cursor positions=%q output tail=%q", minRow, maxRow, minCol, maxCol, cursorPosition.FindAllSubmatch(data[start:], -1), tail(data[start:], 500))
+		}
+	}
+}
+
 func (p *ptyTranscript) waitForScreenSince(t *testing.T, start int, marker string) []byte {
 	t.Helper()
 	timer := time.NewTimer(5 * time.Second)
@@ -412,7 +432,7 @@ func (p *ptyTranscript) waitForScreenSince(t *testing.T, start int, marker strin
 		p.mu.Lock()
 		data := append([]byte(nil), p.data...)
 		p.mu.Unlock()
-		if start < len(data) && screenContainsSince(data, start, marker) {
+		if start < len(data) && screenContains(data, marker) {
 			return data
 		}
 		select {
@@ -432,11 +452,18 @@ func tail(data []byte, length int) []byte {
 	return data
 }
 
-func screenContainsSince(data []byte, start int, marker string) bool {
+func screenContains(data []byte, marker string) bool {
 	screen := newTestTerminal()
-	screen.apply(data[:start])
-	screen.apply(data[start:])
+	// A checkpoint may fall inside an escape sequence. Decode the transcript
+	// as one stream so the screen state is independent of that byte offset.
+	screen.apply(data)
 	return strings.Contains(screen.text(), marker)
+}
+
+func screenContainsAtRow(data []byte, row int, marker string) bool {
+	screen := newTestTerminal()
+	screen.apply(data)
+	return row >= 1 && row <= len(screen.cells) && strings.Contains(string(screen.cells[row-1]), marker)
 }
 
 type testTerminal struct {
@@ -539,17 +566,23 @@ func numberedLines(prefix string, count int) string {
 	return lines
 }
 
+var cursorPosition = regexp.MustCompile(`\x1b\[([0-9]+);([0-9]+)H`)
 var cursorPositionBeforeShow = regexp.MustCompile(`\x1b\[([0-9]+);([0-9]+)H(\x1b\[[0-9;?]*[A-Za-z])*\x1b\[\?25h`)
 
-func hasVisibleCursorWithin(transcript []byte, rows, cols int) bool {
-	for _, match := range cursorPositionBeforeShow.FindAllSubmatch(transcript, -1) {
-		row, _ := strconv.Atoi(string(match[1]))
-		col, _ := strconv.Atoi(string(match[2]))
-		if row >= 1 && row <= rows && col >= 1 && col <= cols {
-			return true
-		}
+func lastCursorPositionWithin(transcript []byte, minRow, maxRow, minCol, maxCol int) bool {
+	matches := cursorPosition.FindAllSubmatch(transcript, -1)
+	if len(matches) == 0 {
+		return false
 	}
-	return false
+	last := matches[len(matches)-1]
+	row, _ := strconv.Atoi(string(last[1]))
+	col, _ := strconv.Atoi(string(last[2]))
+	return row >= minRow && row <= maxRow && col >= minCol && col <= maxCol
+}
+
+func cursorRemainsVisible(transcript []byte) bool {
+	show, hide := bytes.LastIndex(transcript, []byte("\x1b[?25h")), bytes.LastIndex(transcript, []byte("\x1b[?25l"))
+	return show >= 0 && show > hide
 }
 
 func hasVisibleCursorInColumnRange(transcript []byte, minCol, maxCol int) bool {
