@@ -20,6 +20,8 @@ type BufWindow struct {
 	Buf *buffer.Buffer
 
 	active bool
+	// SuppressCursor leaves active-line styling intact during offscreen composition.
+	SuppressCursor bool
 
 	sline *StatusLine
 
@@ -377,7 +379,7 @@ func (w *BufWindow) getStyle(style tcell.Style, bloc buffer.Loc) (tcell.Style, b
 }
 
 func (w *BufWindow) showCursor(x, y int, main bool) {
-	if w.active {
+	if w.active && !w.SuppressCursor {
 		if main {
 			screen.ShowCursor(x, y)
 		} else {

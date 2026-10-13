@@ -892,9 +892,10 @@ Handoff:
   `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime assets override
   embedded assets by name. The command-line debounce overrides
   `mdiff.diff-debounce-ms` in `settings.json`.
-- mdiff startup does not create the Micro config directory or write source
-  config, settings defaults, or buffer-state files. Trusted Micro plugins keep
-  their normal file effects, including persistence through `TryBindKey`.
+- mdiff startup creates a missing selected default Micro config directory, but
+  does not write source config or settings defaults. An explicit `--config-dir`
+  must exist. Configured Micro history and buffer-state persistence is enabled;
+  trusted plugins retain their normal file effects, including `TryBindKey`.
   Explicit document saves and configured backups/autosave remain enabled.
 - Both panes receive Micro's parsed options and synthetic filetype settings.
   Configured bindings are loaded with mdiff lifecycle controls reserved;

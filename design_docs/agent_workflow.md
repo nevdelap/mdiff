@@ -40,7 +40,9 @@ does not mark a task complete while material findings remain.
 
 1. Igor selects the first `NEW` task whose dependencies are `COMPLETED`.
 2. Igor reads the task and applicable lessons, implements its scope, and runs
-   the specified gates.
+   the specified gates. For each new change with material code changes, Igor
+   increments mdiff's patch version once and records it in the release notes,
+   following the policy in [`docs/development.md`](../docs/development.md).
 3. Igor records changed areas, verification commands and results, and any
    environment limitation in the task handoff. The task moves to `IMPLEMENTED`.
 4. Rufus reviews the full change independently, checks the acceptance criteria,

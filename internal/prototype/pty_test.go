@@ -20,6 +20,7 @@ import (
 func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
@@ -47,7 +48,7 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	if transcript.mouseModeRequested() {
 		mouseStart := transcript.mark()
 		writePTY(t, terminal, []byte{0x1b, '[', 'M', 96, 55, 34}) // X11 wheel-up over the right pane.
-		transcript.waitForScreenSince(t, mouseStart, "L19")
+		transcript.waitForScreenSince(t, mouseStart, "L20")
 	} else {
 		t.Log("PTY terminfo did not enable mouse reporting; simulation tests cover wheel routing")
 	}
@@ -99,6 +100,7 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
 	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 40})
@@ -144,6 +146,7 @@ func TestCLIRejectsMoreThanTwoPathsBeforeTerminalInitialization(t *testing.T) {
 func TestPTYFileArgumentsOpenSaveAndOpenOnlyFocusedPane(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	filesDir := t.TempDir()
 	leftPath := filepath.Join(filesDir, "left.txt")
 	rightPath := filepath.Join(filesDir, "right.txt")
@@ -195,6 +198,7 @@ func TestPTYFileArgumentsOpenSaveAndOpenOnlyFocusedPane(t *testing.T) {
 func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	leftPath, rightPath := writeWorkflowFiles(t, "left.txt", "LEFT-OLD\n", "right.txt", "RIGHT-OLD\n")
 	cmd := exec.Command(binary, leftPath, rightPath)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
@@ -233,6 +237,7 @@ func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
 func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	leftPath := filepath.Join(t.TempDir(), "left.txt")
 	if err := os.WriteFile(leftPath, []byte("LEFT-OLD\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -269,6 +274,7 @@ func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
 func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	savePath := filepath.Join(t.TempDir(), "unnamed-save.txt")
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
@@ -609,12 +615,27 @@ func assertNoUnexpectedPersistedState(t *testing.T, configDir string) {
 			}
 			continue
 		}
+		if entry.Name() == "settings.json" && !entry.IsDir() {
+			continue
+		}
 		if (entry.Name() != "buffers" && entry.Name() != "backups") || !entry.IsDir() {
 			t.Fatalf("editor wrote unexpected configuration or buffer state: %v", entries)
 		}
 		children, err := os.ReadDir(filepath.Join(configDir, entry.Name()))
-		if err != nil || len(children) != 0 {
+		if err != nil || (len(children) > 1 || (len(children) == 1 && children[0].Name() != "history")) {
 			t.Fatalf("editor wrote unexpected files under %s: entries=%v err=%v", entry.Name(), children, err)
+		}
+	}
+}
+
+func preparePTYConfig(t *testing.T, configDir string) {
+	t.Helper()
+	for name, contents := range map[string]string{
+		"settings.json": `{"keymenu":true}`,
+		"bindings.json": `{"buffer":{"CtrlUp":"ScrollUp","CtrlDown":"ScrollDown"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(configDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
 }

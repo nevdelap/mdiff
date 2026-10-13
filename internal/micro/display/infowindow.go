@@ -95,72 +95,98 @@ func (i *InfoWindow) Clear() {
 	}
 }
 
-func (i *InfoWindow) displayBuffer() {
-	b := i.Buffer
-	line := b.LineBytes(0)
-	activeC := b.GetActiveCursor()
+// DisplayPromptRow paints only the prompt row and returns its cursor column.
+// Callers composing their own footer can present the cursor after composition.
+func (i *InfoWindow) DisplayPromptRow() int {
+	return i.promptRow(true)
+}
 
-	blocX := 0
-	vlocX := util.CharacterCountInString(i.Msg)
+// PromptCursorColumn returns the prompt cursor column without painting.
+func (i *InfoWindow) PromptCursorColumn() int {
+	return i.promptRow(false)
+}
 
-	tabsize := 4
-	line, nColsBeforeStart, bslice := util.SliceVisualEnd(line, blocX, tabsize)
-	blocX = bslice
-
-	draw := func(r rune, combc []rune, style tcell.Style) {
-		if nColsBeforeStart <= 0 {
-			bloc := buffer.Loc{X: blocX, Y: 0}
-			if activeC.HasSelection() &&
-				(bloc.GreaterEqual(activeC.CurSelection[0]) && bloc.LessThan(activeC.CurSelection[1]) ||
-					bloc.LessThan(activeC.CurSelection[0]) && bloc.GreaterEqual(activeC.CurSelection[1])) {
-				// The current character is selected
-				style = i.defStyle().Reverse(true)
-
-				if s, ok := config.Colorscheme["selection"]; ok {
-					style = s
-				}
-
-			}
-
-			screen.SetContent(vlocX, i.Y, r, combc, style)
-			vlocX += runewidth.RuneWidth(r)
-		}
-		nColsBeforeStart--
+func (i *InfoWindow) promptRow(paint bool) int {
+	if paint {
+		i.Clear()
 	}
-
-	totalwidth := blocX - nColsBeforeStart
+	style := i.defStyle()
+	if i.HasError {
+		style = i.errStyle()
+	}
+	x := 0
+	for msg := i.Msg; len(msg) > 0 && x < i.Width; {
+		r, combc, size := util.DecodeCharacterInString(msg)
+		width := runewidth.RuneWidth(r)
+		if paint && width > 0 && x+width <= i.Width {
+			screen.SetContent(x, i.Y, r, combc, style)
+		}
+		x += width
+		msg = msg[size:]
+	}
+	if !i.HasPrompt || i.Buffer == nil || i.Width <= 0 {
+		return 0
+	}
+	prefixWidth := min(x, i.Width)
+	available := i.Width - prefixWidth
+	if available <= 0 {
+		return i.Width - 1
+	}
+	line := i.Buffer.LineBytes(0)
+	cursor := i.Buffer.GetActiveCursor()
+	type character struct {
+		r     rune
+		combc []rune
+		width int
+	}
+	chars := make([]character, 0, util.CharacterCount(line))
+	positions := []int{0}
 	for len(line) > 0 {
-		curVX := vlocX
-		curBX := blocX
 		r, combc, size := util.DecodeCharacter(line)
-
-		width := 0
-
-		switch r {
-		case '\t':
-			width = tabsize - (totalwidth % tabsize)
-			for j := 0; j < width; j++ {
-				draw(' ', nil, i.defStyle())
-			}
-		default:
-			width = runewidth.RuneWidth(r)
-			draw(r, combc, i.defStyle())
+		width := runewidth.RuneWidth(r)
+		if r == '\t' {
+			width = 4 - positions[len(positions)-1]%4
 		}
-
-		blocX++
+		chars = append(chars, character{r, combc, width})
+		positions = append(positions, positions[len(positions)-1]+width)
 		line = line[size:]
-
-		if activeC.X == curBX {
-			screen.ShowCursor(curVX, i.Y)
-		}
-		totalwidth += width
-		if vlocX >= i.Width {
+	}
+	index := min(max(cursor.X, 0), len(chars))
+	start := 0
+	for start < index && positions[index]-positions[start] >= available {
+		start++
+	}
+	cursorX := min(i.Width-1, prefixWidth+positions[index]-positions[start])
+	if !paint {
+		return cursorX
+	}
+	selection := i.defStyle().Reverse(true)
+	if s, ok := config.Colorscheme["selection"]; ok {
+		selection = s
+	}
+	x = prefixWidth
+	for n := start; n < len(chars) && x < i.Width; n++ {
+		ch := chars[n]
+		if x+ch.width > i.Width {
 			break
 		}
+		charStyle := i.defStyle()
+		loc := buffer.Loc{X: n, Y: 0}
+		if cursor.HasSelection() &&
+			(loc.GreaterEqual(cursor.CurSelection[0]) && loc.LessThan(cursor.CurSelection[1]) ||
+				loc.LessThan(cursor.CurSelection[0]) && loc.GreaterEqual(cursor.CurSelection[1])) {
+			charStyle = selection
+		}
+		if ch.r == '\t' {
+			for j := 0; j < ch.width; j++ {
+				screen.SetContent(x+j, i.Y, ' ', nil, charStyle)
+			}
+		} else {
+			screen.SetContent(x, i.Y, ch.r, ch.combc, charStyle)
+		}
+		x += ch.width
 	}
-	if activeC.X == blocX {
-		screen.ShowCursor(vlocX, i.Y)
-	}
+	return cursorX
 }
 
 var keydisplay = []string{"^Q Quit, ^S Save, ^O Open, ^G Help, ^E Command Bar, ^K Cut Line", "^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New Tab"}
@@ -212,7 +238,6 @@ func (i *InfoWindow) scrollToSuggestion() {
 func (i *InfoWindow) Display() {
 	if i.HasPrompt || config.GlobalSettings["infobar"].(bool) {
 		i.Clear()
-		x := 0
 		if config.GetGlobalOption("keymenu").(bool) {
 			i.displayKeyMenu()
 		}
@@ -220,21 +245,18 @@ func (i *InfoWindow) Display() {
 		if !i.HasPrompt && !i.HasMessage && !i.HasError {
 			return
 		}
-		i.Clear()
-		style := i.defStyle()
-
-		if i.HasError {
-			style = i.errStyle()
-		}
-
-		display := i.Msg
-		for _, c := range display {
-			screen.SetContent(x, i.Y, c, nil, style)
-			x += runewidth.RuneWidth(c)
-		}
-
 		if i.HasPrompt {
-			i.displayBuffer()
+			screen.ShowCursor(i.DisplayPromptRow(), i.Y)
+		} else {
+			style := i.defStyle()
+			if i.HasError {
+				style = i.errStyle()
+			}
+			x := 0
+			for _, c := range i.Msg {
+				screen.SetContent(x, i.Y, c, nil, style)
+				x += runewidth.RuneWidth(c)
+			}
 		}
 	}
 

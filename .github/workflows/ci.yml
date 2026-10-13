@@ -5,6 +5,9 @@ name: CI
     branches:
       - '**'
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1'
 permissions:
   contents: read
 jobs:
@@ -31,6 +34,39 @@ jobs:
             github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
       - name: Run formatting and lint checks
         run: just --no-deps lint
+      - name: Check Just run argument forwarding
+        run: just --no-deps test-run-args
+  race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Install Just
+        uses: taiki-e/install-action@just
+      - name: Run race detector
+        run: just --no-deps test-race
+  fuzz:
+    if: github.event_name != 'push' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Install Just
+        uses: taiki-e/install-action@just
+      - name: Run seeded comparison fuzz campaign
+        run: just --no-deps test-fuzz
   build-and-test:
     strategy:
       fail-fast: false

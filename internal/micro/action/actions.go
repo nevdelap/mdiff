@@ -58,12 +58,12 @@ func (h *BufPane) ScrollReachedEnd() bool {
 // This is almost always bound to left click
 func (h *BufPane) MousePress(e *tcell.EventMouse) bool {
 	b := h.Buf
-	mx, my := e.Position()
+	_, my := e.Position()
 	// ignore click on the status line
 	if my >= h.BufView().Y+h.BufView().Height {
 		return false
 	}
-	mouseLoc := h.LocFromVisual(buffer.Loc{mx, my})
+	mouseLoc := h.mouseLocation(e)
 	h.Cursor.Loc = mouseLoc
 
 	if b.NumCursors() > 1 {
@@ -109,12 +109,12 @@ func (h *BufPane) MousePress(e *tcell.EventMouse) bool {
 }
 
 func (h *BufPane) MouseDrag(e *tcell.EventMouse) bool {
-	mx, my := e.Position()
+	_, my := e.Position()
 	// ignore drag on the status line
 	if my >= h.BufView().Y+h.BufView().Height {
 		return false
 	}
-	h.Cursor.Loc = h.LocFromVisual(buffer.Loc{mx, my})
+	h.Cursor.Loc = h.mouseLocation(e)
 
 	if h.TripleClick {
 		h.Cursor.AddLineToSelection()
@@ -2307,12 +2307,12 @@ func (h *BufPane) SpawnMultiCursorSelect() bool {
 // or removes a cursor if it is already there
 func (h *BufPane) MouseMultiCursor(e *tcell.EventMouse) bool {
 	b := h.Buf
-	mx, my := e.Position()
+	_, my := e.Position()
 	// ignore click on the status line
 	if my >= h.BufView().Y+h.BufView().Height {
 		return false
 	}
-	mouseLoc := h.LocFromVisual(buffer.Loc{X: mx, Y: my})
+	mouseLoc := h.mouseLocation(e)
 
 	if h.Buf.NumCursors() > 1 {
 		cursors := h.Buf.GetCursors()

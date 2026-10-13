@@ -28,6 +28,9 @@ func (b *Buffer) Serialize() error {
 	if b.Path == "" {
 		return nil
 	}
+	if _, err := os.Stat(config.ConfigDir); errors.Is(err, os.ErrNotExist) {
+		return nil // mdiff does not create the config directory.
+	}
 
 	var buf bytes.Buffer
 	err := gob.NewEncoder(&buf).Encode(SerializedBuffer{
@@ -40,6 +43,9 @@ func (b *Buffer) Serialize() error {
 	}
 
 	name, resolveName := util.DetermineEscapePath(filepath.Join(config.ConfigDir, "buffers"), b.AbsPath)
+	if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+		return err
+	}
 	err = util.SafeWrite(name, buf.Bytes(), true)
 	if err != nil {
 		return err

@@ -1,6 +1,8 @@
 package prototype
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +17,9 @@ import (
 
 func TestSimulationEditingAlignmentScrollResize(t *testing.T) {
 	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"keymenu":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	sim := tcell.NewSimulationScreen("")
 	if err := sim.Init(); err != nil {
 		t.Fatal(err)
@@ -84,7 +89,7 @@ func TestSimulationEditingAlignmentScrollResize(t *testing.T) {
 		app.setFocus()
 		app.focusedPane().h.GotoLoc(buffer.Loc{X: 0, Y: 0})
 		app.top = 0
-		app.handle(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModAlt, ""))
+		app.handle(tcell.NewEventKey(tcell.KeyRune, ']', tcell.ModAlt, ""))
 		if app.focusedPane().h.Cursor.Y != 1 || app.top != 1 {
 			t.Fatalf("diff jump from side %d did not land on the first hunk: cursor=%v top=%d", side, app.focusedPane().h.Cursor.Loc, app.top)
 		}
@@ -386,18 +391,18 @@ func TestDiffNavigationMovesBetweenDistinctHunksInBothDirections(t *testing.T) {
 	app.focus = viewport.Left
 	app.setFocus()
 	app.top = 0
-	app.handle(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModAlt, ""))
+	app.handle(tcell.NewEventKey(tcell.KeyRune, ']', tcell.ModAlt, ""))
 	first := app.top
-	app.handle(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModAlt, ""))
+	app.handle(tcell.NewEventKey(tcell.KeyRune, ']', tcell.ModAlt, ""))
 	second := app.top
 	if first != 1 || second != 8 {
 		t.Fatalf("next-difference viewport positions = %d, %d; want distinct hunks at 1, 8", first, second)
 	}
-	app.handle(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModAlt, ""))
+	app.handle(tcell.NewEventKey(tcell.KeyRune, '[', tcell.ModAlt, ""))
 	if app.top != first {
 		t.Fatalf("previous-difference viewport = %d, want first hunk at %d", app.top, first)
 	}
-	app.handle(tcell.NewEventKey(tcell.KeyUp, 0, tcell.ModAlt, ""))
+	app.handle(tcell.NewEventKey(tcell.KeyRune, '[', tcell.ModAlt, ""))
 	if app.top != first {
 		t.Fatalf("previous-difference at first hunk moved to %d, want stable position %d", app.top, first)
 	}

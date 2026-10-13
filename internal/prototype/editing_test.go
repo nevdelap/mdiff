@@ -194,7 +194,7 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	row1 := screenLine(sim, app.menuRow1, app.cols)
 	row2 := screenLine(sim, app.menuRow2, app.cols)
 	wantRow1 := "^W Switch Panes, ^Q Quit, ^S Save, ^O Open, ^G Help, ^E Command Bar, ^K Cut Line"
-	wantRow2 := "^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New Tab"
+	wantRow2 := "^F Find, ^Z Undo, ^Y Redo, ^A Select All, ^D Duplicate Line, ^T New File"
 	if !strings.HasPrefix(row1, wantRow1) || !strings.HasPrefix(row2, wantRow2) {
 		t.Fatalf("Micro menu order/separators changed: row1=%q row2=%q", row1, row2)
 	}
@@ -203,12 +203,12 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 			t.Errorf("menu row %q does not contain %q", row1, label)
 		}
 	}
-	for _, label := range []string{"^F Find", "^Z Undo", "^Y Redo", "^A Select All", "^D Duplicate Line", "^T New Tab"} {
+	for _, label := range []string{"^F Find", "^Z Undo", "^Y Redo", "^A Select All", "^D Duplicate Line", "^T New File"} {
 		if !strings.Contains(row2, label) {
 			t.Errorf("menu row %q does not contain %q", row2, label)
 		}
 	}
-	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.1") {
+	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.2") {
 		t.Fatalf("right-aligned menu indicators missing: row1=%q row2=%q", row1, row2)
 	}
 	app.handle(key(tcell.KeyCtrlW, 0, tcell.ModCtrl))
@@ -248,9 +248,10 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	}
 
 	app.handle(key(tcell.KeyCtrlG, 0, tcell.ModCtrl))
-	if actionMessage := app.currentStatus(); !strings.Contains(actionMessage, "mdiff:") {
-		t.Fatalf("Ctrl+G did not show help: %q", actionMessage)
+	if !app.helpVisible || app.helpTopic != "help" {
+		t.Fatalf("Ctrl+G did not show Micro help: visible=%t topic=%q", app.helpVisible, app.helpTopic)
 	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "memory")
 	before := string(app.left.buf.Bytes())
 	rightName := app.right.buf.GetName()
@@ -270,7 +271,6 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 		mods tcell.ModMask
 		want string
 	}{
-		{tcell.KeyF2, tcell.ModNone, "Save is unavailable"},
 		{tcell.KeyCtrlB, tcell.ModCtrl, "ShellMode is unavailable"},
 	} {
 		app.handle(key(rejected.key, 0, rejected.mods))
@@ -278,6 +278,11 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 			t.Errorf("rejected key %v did not report %q: %q", rejected.key, rejected.want, app.currentStatus())
 		}
 	}
+	app.handle(key(tcell.KeyF2, 0, tcell.ModNone))
+	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "Filename:") {
+		t.Fatalf("F2 did not route Micro save: %q", app.currentStatus())
+	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	if got := string(app.left.buf.Bytes()); got != before {
 		t.Fatalf("rejected file/shell action changed buffer: %q", got)
 	}
@@ -301,18 +306,15 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	}
 	app.handle(key(tcell.KeyEnter, 0, tcell.ModNone))
 	if got := string(app.left.buf.Bytes()); got != commandBaseline {
-		t.Fatalf("rejected save changed buffer: %q, before %q", got, commandBaseline)
+		t.Fatalf("save command changed buffer: %q, before %q", got, commandBaseline)
 	}
-	if _, err := os.Stat(savePath); !os.IsNotExist(err) {
-		t.Fatalf("rejected save created a file, stat error=%v", err)
+	if got, err := os.ReadFile(savePath); err != nil || string(got) != commandBaseline {
+		t.Fatalf("save command wrote %q, %v; want %q", got, err, commandBaseline)
 	}
-	if app.left.buf.GetName() != "No name" || app.right.buf.GetName() != rightName {
+	if app.left.buf.Path != savePath || app.right.buf.GetName() != rightName {
 		t.Fatalf("new document did not preserve the opposite pane: left=%q right=%q", app.left.buf.GetName(), app.right.buf.GetName())
 	}
-	if !strings.Contains(app.currentStatus(), "Command unavailable") {
-		t.Fatalf("unsafe command was not rejected visibly: %q", app.currentStatus())
-	}
-	for _, unsafe := range []string{"open " + savePath, "run touch " + savePath} {
+	for _, unsafe := range []string{"vsplit " + savePath, "term touch " + savePath} {
 		app.handle(key(tcell.KeyCtrlE, 0, tcell.ModCtrl))
 		for _, r := range unsafe {
 			app.handle(key(tcell.KeyRune, r, tcell.ModNone))
@@ -322,8 +324,8 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 			t.Fatalf("unsafe command %q was not rejected visibly: %q", unsafe, app.currentStatus())
 		}
 	}
-	if _, err := os.Stat(savePath); !os.IsNotExist(err) {
-		t.Fatalf("rejected open/external command created a file, stat error=%v", err)
+	if got, err := os.ReadFile(savePath); err != nil || string(got) != commandBaseline {
+		t.Fatalf("blocked commands changed saved file: %q, %v", got, err)
 	}
 
 	narrow, narrowScreen := newEditingTestApp(t, 14, 5)
@@ -342,9 +344,9 @@ func TestRejectedSequencePrefixesOnReservedKeysAreBlocked(t *testing.T) {
 		config string
 		want   string
 	}{
-		{tcell.KeyCtrlQ, `"<Ctrl-q><Ctrl-s>":"Save"`, "Save is unavailable"},
-		{tcell.KeyCtrlG, `"<Ctrl-g><Ctrl-s>":"Save"`, "Save is unavailable"},
-		{tcell.KeyCtrlE, `"<Ctrl-e><Ctrl-s>":"Save"`, "Save is unavailable"},
+		{tcell.KeyCtrlQ, `"<Ctrl-q><Ctrl-s>":"Unsplit"`, "Unsplit is unavailable"},
+		{tcell.KeyCtrlG, `"<Ctrl-g><Ctrl-s>":"Unsplit"`, "Unsplit is unavailable"},
+		{tcell.KeyCtrlE, `"<Ctrl-e><Ctrl-s>":"Unsplit"`, "Unsplit is unavailable"},
 	} {
 		t.Run(tc.want+tc.config[:8], func(t *testing.T) {
 			configDir := t.TempDir()
@@ -375,7 +377,7 @@ func TestRejectedSequencePrefixesOnReservedKeysAreBlocked(t *testing.T) {
 	}
 }
 
-func TestReservedKeysRejectConfiguredUnsafeActions(t *testing.T) {
+func TestReservedKeysHonorCompatibleRemaps(t *testing.T) {
 	configDir := t.TempDir()
 	bindings := `{"buffer":{"Ctrl-q":"Save","Ctrl-g":"OpenFile","Ctrl-e":"ShellMode"}}`
 	if err := os.WriteFile(filepath.Join(configDir, "bindings.json"), []byte(bindings), 0o600); err != nil {
@@ -391,24 +393,21 @@ func TestReservedKeysRejectConfiguredUnsafeActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer app.Close()
+	if row := app.shortcutBar(0); strings.Contains(row, "^Q Quit") || !strings.Contains(row, "^Q Save") {
+		t.Fatalf("remapped footer advertises inactive binding: %q", row)
+	}
 
-	for _, tc := range []struct {
-		key  tcell.Key
-		want string
-	}{
-		{tcell.KeyCtrlQ, "Save is unavailable"},
-		{tcell.KeyCtrlG, "OpenFile is unavailable"},
-		{tcell.KeyCtrlE, "ShellMode is unavailable"},
-	} {
-		if quit := app.handle(key(tc.key, 0, tcell.ModCtrl)); quit {
-			t.Errorf("configured unsafe action on key %v caused mdiff to quit", tc.key)
-		}
-		if status := app.currentStatus(); !strings.Contains(status, tc.want) {
-			t.Errorf("configured action on key %v status = %q, want %q", tc.key, status, tc.want)
-		}
-		if action.InfoBar != nil && action.InfoBar.HasPrompt {
-			t.Errorf("configured action on key %v opened an app prompt", tc.key)
-		}
+	if app.handle(key(tcell.KeyCtrlQ, 0, tcell.ModCtrl)) || !action.InfoBar.HasPrompt {
+		t.Fatal("remapped Ctrl+Q did not invoke Save")
+	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
+	if app.handle(key(tcell.KeyCtrlG, 0, tcell.ModCtrl)) || !action.InfoBar.HasPrompt {
+		t.Fatal("remapped Ctrl+G did not invoke OpenFile")
+	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
+	app.handle(key(tcell.KeyCtrlE, 0, tcell.ModCtrl))
+	if !strings.Contains(app.currentStatus(), "ShellMode is unavailable") {
+		t.Fatalf("unsupported shell mode was not explained: %q", app.currentStatus())
 	}
 }
 
@@ -422,7 +421,7 @@ func TestDefaultCtrlQStillQuits(t *testing.T) {
 
 func TestConfiguredUnsafeActionIsFilteredWithExplanation(t *testing.T) {
 	configDir := t.TempDir()
-	bindings := []byte(`{"buffer":{"Ctrl-r":"Save","<Ctrl-x><Ctrl-s>":"Save"}}`)
+	bindings := []byte(`{"buffer":{"Ctrl-r":"Unsplit","<Ctrl-x><Ctrl-s>":"Unsplit"}}`)
 	if err := os.WriteFile(filepath.Join(configDir, "bindings.json"), bindings, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +443,7 @@ func TestConfiguredUnsafeActionIsFilteredWithExplanation(t *testing.T) {
 	if app.left.buf.Settings["ruler"] != ruler {
 		t.Fatal("configured Save binding ran the built-in ruler action")
 	}
-	if !strings.Contains(app.currentStatus(), "Save is unavailable") {
+	if !strings.Contains(app.currentStatus(), "Unsplit is unavailable") {
 		t.Fatalf("configured unsafe action was not explained: %q", app.currentStatus())
 	}
 	if app.closed {
@@ -455,7 +454,7 @@ func TestConfiguredUnsafeActionIsFilteredWithExplanation(t *testing.T) {
 		t.Fatal("blocked key-sequence prefix ran Micro's single-key cut action")
 	}
 	app.handle(key(tcell.KeyCtrlS, 0, tcell.ModCtrl))
-	if string(app.left.buf.Bytes()) != before || !strings.Contains(app.currentStatus(), "Save is unavailable") {
+	if string(app.left.buf.Bytes()) != before || !strings.Contains(app.currentStatus(), "Unsplit is unavailable") {
 		t.Fatalf("configured unsafe key sequence changed content or lacked explanation: content=%q status=%q", app.left.buf.Bytes(), app.currentStatus())
 	}
 }
@@ -490,7 +489,7 @@ func TestConfiguredUnsplitActionIsRejectedWithoutChangingPanes(t *testing.T) {
 	}
 }
 
-func TestConfiguredPrivateViewportActionsAreRejected(t *testing.T) {
+func TestConfiguredPrivateViewportActionsUseSharedViewport(t *testing.T) {
 	for _, actionName := range []string{
 		"ScrollUp", "ScrollDown", "Center", "Start", "End", "PageUp", "PageDown", "HalfPageUp", "HalfPageDown",
 	} {
@@ -525,11 +524,11 @@ func TestConfiguredPrivateViewportActionsAreRejected(t *testing.T) {
 			if quit := app.handle(key(tcell.KeyCtrlR, 0, tcell.ModCtrl)); quit {
 				t.Fatal("rejected view action terminated mdiff")
 			}
-			if app.top != beforeTop {
-				t.Fatalf("rejected view action moved shared viewport from %d to %d", beforeTop, app.top)
+			if app.top == beforeTop {
+				t.Fatalf("adapted view action did not move shared viewport from %d", beforeTop)
 			}
-			if status := app.currentStatus(); !strings.Contains(status, actionName+" is unavailable") {
-				t.Fatalf("view action diagnostic = %q", status)
+			if status := app.currentStatus(); strings.Contains(status, actionName+" is unavailable") {
+				t.Fatalf("adapted view action was rejected: %q", status)
 			}
 		})
 	}
@@ -537,12 +536,16 @@ func TestConfiguredPrivateViewportActionsAreRejected(t *testing.T) {
 
 func newEditingTestApp(t *testing.T, width, height int) (*App, tcell.SimulationScreen) {
 	t.Helper()
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"keymenu":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	sim := tcell.NewSimulationScreen("")
 	if err := sim.Init(); err != nil {
 		t.Fatal(err)
 	}
 	sim.SetSize(width, height)
-	app, err := New(sim, t.TempDir())
+	app, err := New(sim, configDir)
 	if err != nil {
 		t.Fatal(err)
 	}

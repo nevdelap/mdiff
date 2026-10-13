@@ -1,11 +1,15 @@
 package prototype
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/micro-editor/tcell/v2"
+	"github.com/nevdelap/mdiff/internal/compare"
+	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
 	"github.com/nevdelap/mdiff/internal/micro/display"
@@ -14,7 +18,7 @@ import (
 )
 
 func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
-	app, _ := newRenderTestApp(t)
+	app, sim := newRenderTestApp(t)
 	defer app.Close()
 	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "cat")
 	app.right.buf.Insert(buffer.Loc{X: 0, Y: 0}, "cut")
@@ -33,7 +37,7 @@ func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
 	leftTextX := app.left.view.BufView().X
 	rightTextX := app.right.view.BufView().X
 	assertCellStyle(t, app.surface, leftTextX+1, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
-	assertCellStyle(t, app.surface, rightTextX+1, 0, tcell.ColorGreen, tcell.ColorDarkBlue, 0)
+	assertCellStyle(t, app.surface, rightTextX+1, 0, tcell.ColorGreen, tcell.NewHexColor(0x000046), 0)
 
 	app.left.h.Cursor.CurSelection = [2]buffer.Loc{{X: 1, Y: 0}, {X: 2, Y: 0}}
 	app.draw()
@@ -49,8 +53,11 @@ func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
 	rightUndo, rightRedo := app.right.buf.UndoStack.Len(), app.right.buf.RedoStack.Len()
 	app.draw()
 	_, _, attrs := cellStyle(app.surface, leftTextX+1, 0)
-	if attrs&tcell.AttrReverse == 0 {
-		t.Fatalf("focused cursor did not override changed-character style: attrs=%b", attrs)
+	if attrs&tcell.AttrReverse != 0 {
+		t.Fatalf("focused cursor painted a block over Micro's cursor: attrs=%b", attrs)
+	}
+	if x, y, visible := sim.GetCursor(); !visible || x != leftTextX+1 || y != 0 {
+		t.Fatalf("Micro cursor location not carried to terminal: (%d,%d) visible=%t", x, y, visible)
 	}
 	if got := app.left.buf.Line(0); got != "cat" {
 		t.Fatalf("rendering changed the left buffer: %q", got)
@@ -66,6 +73,438 @@ func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
 		app.right.buf.UndoStack.Len() != rightUndo || app.right.buf.RedoStack.Len() != rightRedo {
 		t.Fatal("rendering changed the right cursor, selection, or undo/redo state")
 	}
+}
+
+func TestFakeCursorUsesOneTerminalCellAndNoPhysicalCursor(t *testing.T) {
+	app, sim := newRenderTestApp(t)
+	defer app.Close()
+	previous := config.GlobalSettings["fakecursor"]
+	config.GlobalSettings["fakecursor"] = true
+	t.Cleanup(func() { config.GlobalSettings["fakecursor"] = previous })
+	app.left.buf.Insert(buffer.Loc{}, "cat")
+	app.left.h.Cursor.GotoLoc(buffer.Loc{X: 1})
+	app.rebuildWithAnchor(anchor{})
+	app.draw()
+	x := app.left.view.BufView().X + 1
+	if _, _, visible := sim.GetCursor(); visible {
+		t.Fatal("physical cursor visible with fakecursor enabled")
+	}
+	_, _, surfaceAttrs := cellStyle(app.surface, x, 0)
+	_, _, terminalAttrs := cellStyle(sim, x, 0)
+	if surfaceAttrs&tcell.AttrReverse != 0 || terminalAttrs&tcell.AttrReverse == 0 {
+		t.Fatalf("fake cursor should appear only on terminal: surface=%b terminal=%b", surfaceAttrs, terminalAttrs)
+	}
+	app.draw()
+	_, _, terminalAttrs = cellStyle(sim, x, 0)
+	if terminalAttrs&tcell.AttrReverse == 0 {
+		t.Fatal("fake cursor disappeared after redraw")
+	}
+}
+
+func TestPromptCursorUsesVisualColumnsAndClipsMixedWidthInput(t *testing.T) {
+	app, sim := newEditingTestApp(t, 30, 10)
+	defer app.Close()
+	app.openCommandBar()
+	for _, r := range "猫" {
+		app.handle(key(tcell.KeyRune, r, tcell.ModNone))
+	}
+	app.draw()
+	if x, y, visible := sim.GetCursor(); !visible || x != 4 || y != app.statusRow {
+		t.Fatalf("wide prompt cursor = (%d,%d) visible=%t, want (4,%d)", x, y, visible, app.statusRow)
+	}
+	for _, r := range "ab界cdefghijklmnopqrstuvwxyz" {
+		app.handle(key(tcell.KeyRune, r, tcell.ModNone))
+	}
+	app.draw()
+	x, y, visible := sim.GetCursor()
+	if !visible || x < 0 || x >= app.cols || y != app.statusRow {
+		t.Fatalf("clipped prompt cursor = (%d,%d) visible=%t", x, y, visible)
+	}
+	if got := string(action.InfoBar.LineBytes(0)); got != "猫ab界cdefghijklmnopqrstuvwxyz" {
+		t.Fatalf("prompt input changed during clipping: %q", got)
+	}
+	if got := screenLine(sim, app.statusRow, app.cols); !strings.Contains(got, "uvwxyz") {
+		t.Fatalf("clipped prompt lost its visible tail: %q", got)
+	}
+}
+
+func TestTwoRowTerminalShowsPromptAndRestoresEditorRows(t *testing.T) {
+	app, sim := newEditingTestApp(t, 30, 2)
+	defer app.Close()
+	if app.rows != 2 || app.statusRow != -1 {
+		t.Fatalf("initial two-row layout = content %d, status %d", app.rows, app.statusRow)
+	}
+	app.openCommandBar()
+	app.handle(key(tcell.KeyRune, 'x', tcell.ModNone))
+	app.draw()
+	if app.rows != 1 || app.statusRow != 1 {
+		t.Fatalf("prompt layout = content %d, status %d; want 1 and 1", app.rows, app.statusRow)
+	}
+	if got := screenLine(sim, 1, app.cols); !strings.HasPrefix(got, "> x") {
+		t.Fatalf("two-row prompt not painted: %q", got)
+	}
+	if x, y, visible := sim.GetCursor(); !visible || x != 3 || y != 1 {
+		t.Fatalf("two-row prompt cursor = (%d,%d) visible=%t", x, y, visible)
+	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
+	app.draw()
+	if app.rows != 2 || app.statusRow != -1 {
+		t.Fatalf("editor rows not restored: content %d, status %d", app.rows, app.statusRow)
+	}
+}
+
+func TestStatusLineUsesVisualColumns(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	previous := screen.Screen
+	screen.Screen = app.surface
+	defer func() { screen.Screen = previous }()
+	app.renderLine(app.statusRow, "猫e\u0301a\tZ", config.DefStyle)
+	for _, tc := range []struct {
+		x int
+		r rune
+	}{
+		{0, '猫'}, {2, 'e'}, {3, 'a'}, {4, ' '}, {7, ' '}, {8, 'Z'},
+	} {
+		r, _, _, _ := app.surface.GetContent(tc.x, app.statusRow)
+		if r != tc.r {
+			t.Fatalf("status cell %d = %q, want %q", tc.x, r, tc.r)
+		}
+	}
+	_, combc, _, _ := app.surface.GetContent(2, app.statusRow)
+	if !reflect.DeepEqual(combc, []rune{'\u0301'}) {
+		t.Fatalf("combining mark lost: %q", string(combc))
+	}
+}
+
+func TestMenuLineAlignsWideTextByVisualColumns(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	app.cols = 12
+	previous := screen.Screen
+	screen.Screen = app.surface
+	defer func() { screen.Screen = previous }()
+	app.renderMenuLine(0, "猫A", "界B", config.DefStyle)
+	for _, tc := range []struct {
+		x int
+		r rune
+	}{
+		{0, '猫'}, {2, 'A'}, {9, '界'}, {11, 'B'},
+	} {
+		r, _, _, _ := app.surface.GetContent(tc.x, 0)
+		if r != tc.r {
+			t.Fatalf("menu cell %d = %q, want %q", tc.x, r, tc.r)
+		}
+	}
+}
+
+func TestFocusedLineKeepsMicroLineNumberAndApprovedDiffPalette(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	withColorscheme(t, map[string]tcell.Style{
+		"line-number":         tcell.StyleDefault.Foreground(tcell.ColorYellow),
+		"current-line-number": tcell.StyleDefault.Foreground(tcell.ColorWhite),
+		"cursor-line":         tcell.StyleDefault.Foreground(tcell.ColorGray),
+	})
+	app.left.buf.Insert(buffer.Loc{}, "same\nleft\nstill same")
+	app.right.buf.Insert(buffer.Loc{}, "same\nright\nstill same")
+	app.rebuildWithAnchor(anchor{})
+	app.left.h.Cursor.GotoLoc(buffer.Loc{Y: 0})
+	app.draw()
+	leftTextX := app.left.view.BufView().X
+	assertCellStyle(t, app.surface, 0, 0, tcell.ColorWhite, tcell.ColorGray, 0)
+	_, bg, _ := cellStyle(app.surface, leftTextX, 0)
+	if bg != tcell.ColorGray {
+		t.Fatalf("equal current line background = %v, want grey", bg)
+	}
+	_, bg, _ = cellStyle(app.surface, leftTextX, 1)
+	if bg != tcell.NewHexColor(0x000046) {
+		t.Fatalf("noncurrent changed line background = %v, want half-brightness blue", bg)
+	}
+	_, bg, _ = cellStyle(app.surface, leftTextX, 2)
+	_, normalBG, _ := config.DefStyle.Decompose()
+	if bg != normalBG {
+		t.Fatalf("noncurrent equal line background = %v, want Micro default %v", bg, normalBG)
+	}
+	app.left.h.Cursor.GotoLoc(buffer.Loc{Y: 1})
+	app.draw()
+	assertCellStyle(t, app.surface, 0, 1, tcell.ColorWhite, tcell.ColorDarkBlue, 0)
+	_, bg, _ = cellStyle(app.surface, leftTextX, 1)
+	if bg != tcell.ColorDarkBlue {
+		t.Fatalf("changed current line background = %v, want approved dark blue", bg)
+	}
+	for _, tc := range []struct {
+		kind       compare.Kind
+		right      bool
+		noncurrent tcell.Color
+		current    tcell.Color
+	}{
+		{compare.Changed, false, tcell.NewHexColor(0x000046), tcell.ColorDarkBlue},
+		{compare.Spacer, false, tcell.NewHexColor(0x460000), tcell.ColorDarkRed},
+		{compare.Spacer, true, tcell.NewHexColor(0x003200), tcell.ColorDarkGreen},
+	} {
+		_, dark, _ := diffStyle(tc.kind, tc.right, false).Decompose()
+		_, light, _ := diffStyle(tc.kind, tc.right, true).Decompose()
+		if dark != tc.noncurrent || light != tc.current {
+			t.Fatalf("diff colors = (%v,%v), want (%v,%v)", dark, light, tc.noncurrent, tc.current)
+		}
+	}
+}
+
+func TestMicroColorschemeOverridesDiffBackgroundsWithoutReplacingForegrounds(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	const theme = `color-link mdiff.diff.changed.current ",#102030"
+color-link mdiff.diff.changed ",#405060"
+color-link mdiff.diff.left-only.current ",#701010"
+color-link mdiff.diff.left-only ",#401010"
+color-link mdiff.diff.right-only.current ",#107010"
+color-link mdiff.diff.right-only ",#104010"`
+	colors, err := config.ParseColorscheme("mdiff-test", theme, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	colors["diff-deleted"] = tcell.StyleDefault.Foreground(tcell.ColorYellow)
+	colors["current-line-number"] = tcell.StyleDefault.Foreground(tcell.ColorWhite)
+	colors["cursor-line"] = tcell.StyleDefault.Foreground(tcell.ColorGray)
+	withColorscheme(t, colors)
+	for _, tc := range []struct {
+		kind    compare.Kind
+		right   bool
+		current bool
+		want    string
+	}{
+		{compare.Changed, false, true, "#102030"},
+		{compare.Changed, false, false, "#405060"},
+		{compare.Spacer, false, true, "#701010"},
+		{compare.Spacer, false, false, "#401010"},
+		{compare.Spacer, true, true, "#107010"},
+		{compare.Spacer, true, false, "#104010"},
+	} {
+		_, bg, _ := diffStyle(tc.kind, tc.right, tc.current).Decompose()
+		if bg != tcell.GetColor(tc.want) {
+			t.Fatalf("theme background for %+v = %v, want %s", tc, bg, tc.want)
+		}
+	}
+	app.left.buf.Insert(buffer.Loc{}, "cat\nsame")
+	app.right.buf.Insert(buffer.Loc{}, "cut\nsame")
+	app.left.h.Cursor.GotoLoc(buffer.Loc{})
+	app.rebuildWithAnchor(anchor{})
+	app.draw()
+	textX := app.left.view.BufView().X
+	assertCellStyle(t, app.surface, textX+1, 0, tcell.ColorYellow, tcell.GetColor("#102030"), 0)
+	fg, bg, _ := cellStyle(app.surface, 0, 0)
+	if fg != tcell.ColorWhite || bg != tcell.GetColor("#102030") {
+		t.Fatalf("current line number style = (%v,%v), want white on theme blue", fg, bg)
+	}
+	_, bg, _ = cellStyle(app.surface, textX, 1)
+	_, normalBG, _ := config.DefStyle.Decompose()
+	if bg != normalBG {
+		t.Fatalf("equal noncurrent row background = %v, want Micro default %v", bg, normalBG)
+	}
+	app.left.h.Cursor.GotoLoc(buffer.Loc{Y: 1})
+	app.draw()
+	_, bg, _ = cellStyle(app.surface, textX, 1)
+	if bg != tcell.ColorGray {
+		t.Fatalf("equal current row background = %v, want Micro cursor-line grey", bg)
+	}
+}
+
+func TestBundledLightThemeKeepsEqualRowsAndReadableDiffBackgrounds(t *testing.T) {
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"colorscheme":"dukelight-tc"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(80, 10)
+	app, err := New(sim, configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Close)
+	if _, ok := config.Colorscheme["mdiff.diff.changed"]; ok {
+		t.Fatal("bundled light theme unexpectedly defines mdiff row colors")
+	}
+	app.left.buf.Insert(buffer.Loc{}, "same\ncat\nleft only\nend")
+	app.right.buf.Insert(buffer.Loc{}, "same\ncut\nend")
+	app.left.h.Cursor.GotoLoc(buffer.Loc{Y: 1})
+	app.rebuildWithAnchor(anchor{})
+	app.draw()
+	leftX := app.left.view.BufView().X
+	rightX := app.right.view.BufView().X
+	const base = 0xf0f0f0
+	if marker, _, _, _ := app.surface.GetContent(app.left.width, 1); marker != '│' {
+		t.Fatalf("known-background theme divider = %q, want ordinary divider", marker)
+	}
+	assertCellStyle(t, app.surface, leftX, 0, tcell.GetColor("#000000"), tcell.NewHexColor(base), 0)
+	assertCellStyle(t, app.surface, rightX, 0, tcell.GetColor("#000000"), tcell.NewHexColor(base), 0)
+	_, equalBG, _ := cellStyle(app.surface, leftX, 3)
+	if equalBG != tcell.NewHexColor(base) {
+		t.Fatalf("equal row background = %v, want Micro default", equalBG)
+	}
+	assertCellStyle(t, app.surface, 0, 1, tcell.GetColor("#004080"), lightDiffBackground(t, compare.Changed, false, true), tcell.AttrBold)
+	assertCellStyle(t, app.surface, leftX+1, 1, tcell.GetColor("#500000"), tcell.NewHexColor(base), 0)
+	assertCellStyle(t, app.surface, rightX+1, 1, tcell.GetColor("#008040"), tcell.NewHexColor(base), 0)
+	if len(app.layout.Rows) <= 2 || app.layout.Rows[2].Kind != compare.Spacer || !app.layout.Rows[2].Right.Spacer {
+		t.Fatalf("fixture did not produce a right spacer: %#v", app.layout.Rows)
+	}
+	_, leftOnlyBG, _ := cellStyle(app.surface, leftX+20, 2)
+	_, rightSpacerBG, _ := cellStyle(app.surface, rightX, 2)
+	if leftOnlyBG != lightDiffBackground(t, compare.Spacer, false, false) ||
+		rightSpacerBG != lightDiffBackground(t, compare.Spacer, true, false) {
+		t.Fatalf("spacer backgrounds = (%v,%v), want readable light red/green", leftOnlyBG, rightSpacerBG)
+	}
+	app.left.h.Cursor.GotoLoc(buffer.Loc{Y: 0})
+	app.draw()
+	assertCellStyle(t, app.surface, leftX, 0, tcell.GetColor("#000000"), tcell.GetColor("#e6e6e6"), 0)
+	config.Colorscheme["mdiff.diff.changed"] = tcell.StyleDefault.Background(tcell.GetColor("#abcdef"))
+	_, overridden, _ := diffStyle(compare.Changed, false, false).Decompose()
+	if overridden != tcell.GetColor("#abcdef") {
+		t.Fatalf("explicit light-theme override = %v, want #abcdef", overridden)
+	}
+}
+
+func TestBundledTerminalDefaultThemeKeepsTerminalBackground(t *testing.T) {
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"colorscheme":"simple"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(80, 10)
+	app, err := New(sim, configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Close)
+	_, terminalBG, _ := config.DefStyle.Decompose()
+	if terminalBG.Hex() >= 0 {
+		t.Fatalf("simple theme background = %v, want terminal default", terminalBG)
+	}
+	if _, ok := config.Colorscheme["mdiff.diff.changed"]; ok {
+		t.Fatal("bundled simple theme unexpectedly defines mdiff row colors")
+	}
+	app.left.buf.Insert(buffer.Loc{}, "same\ncat\nleft only\nend")
+	app.right.buf.Insert(buffer.Loc{}, "same\ncut\nend")
+	app.left.h.Cursor.GotoLoc(buffer.Loc{Y: 1})
+	app.rebuildWithAnchor(anchor{})
+	app.draw()
+	leftX := app.left.view.BufView().X
+	rightX := app.right.view.BufView().X
+	for _, tc := range []struct {
+		x, y int
+		name string
+	}{
+		{leftX, 0, "left equal"}, {rightX, 0, "right equal"},
+		{leftX + 20, 1, "left current changed"}, {rightX + 20, 1, "right noncurrent changed"},
+		{leftX + 20, 2, "left-only"}, {rightX, 2, "right spacer"},
+	} {
+		_, bg, _ := cellStyle(app.surface, tc.x, tc.y)
+		if bg != terminalBG {
+			t.Fatalf("%s background = %v, want terminal default %v", tc.name, bg, terminalBG)
+		}
+	}
+	assertCellStyle(t, app.surface, leftX, 0, tcell.ColorDefault, terminalBG, 0)
+	deletedFG, _, _ := config.Colorscheme["diff-deleted"].Decompose()
+	addedFG, _, _ := config.Colorscheme["diff-added"].Decompose()
+	assertCellStyle(t, app.surface, leftX+1, 1, deletedFG, terminalBG, 0)
+	assertCellStyle(t, app.surface, rightX+1, 1, addedFG, terminalBG, 0)
+	fg, bg, _ := cellStyle(app.surface, 0, 1)
+	lineNumberFG, _, _ := config.Colorscheme["current-line-number"].Decompose()
+	if fg != lineNumberFG || bg != terminalBG {
+		t.Fatalf("current line number style = (%v,%v), want Micro style on terminal background", fg, bg)
+	}
+	config.Colorscheme["mdiff.diff.changed.current"] = tcell.StyleDefault.Background(tcell.GetColor("#123456"))
+	config.Colorscheme["mdiff.diff.right-only"] = tcell.StyleDefault.Background(tcell.GetColor("#234567"))
+	_, changedBG, _ := diffStyle(compare.Changed, false, true).Decompose()
+	_, spacerBG, _ := diffStyle(compare.Spacer, true, false).Decompose()
+	if changedBG != tcell.GetColor("#123456") || spacerBG != tcell.GetColor("#234567") {
+		t.Fatalf("terminal-default theme overrides = (%v,%v), want explicit colors", changedBG, spacerBG)
+	}
+}
+
+func TestTerminalDefaultDividerIdentifiesCoarseChangesAndSpacers(t *testing.T) {
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), []byte(`{"colorscheme":"simple"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(80, 10)
+	app, err := New(sim, configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Close)
+	app.left.buf.Insert(buffer.Loc{}, "same\nold\nleft only\nend")
+	app.right.buf.Insert(buffer.Loc{}, "same\nnew\nright only\nend")
+	app.rebuildWithAnchor(anchor{})
+	// A budget-expired comparison can pair changed lines without rune spans.
+	// Include both spacer directions to check the terminal-default cue.
+	app.pairs = []compare.Pair{
+		{Left: 0, Right: 0, Kind: compare.Equal},
+		{Left: 1, Right: 1, Kind: compare.Changed},
+		{Left: 2, Right: -1, Kind: compare.Spacer},
+		{Left: -1, Right: 2, Kind: compare.Spacer},
+		{Left: 3, Right: 3, Kind: compare.Equal},
+	}
+	app.expandWithAnchor(anchor{})
+	app.draw()
+	dividerX := app.left.width
+	for _, tc := range []struct {
+		row    int
+		marker rune
+		group  string
+	}{
+		{0, '│', ""}, {1, '!', "diff-modified"},
+		{2, '<', "diff-deleted"}, {3, '>', "diff-added"},
+		{4, '│', ""},
+	} {
+		got, _, style, _ := app.surface.GetContent(dividerX, tc.row)
+		fg, bg, _ := style.Decompose()
+		_, terminalBG, _ := config.DefStyle.Decompose()
+		if got != tc.marker || bg != terminalBG {
+			t.Fatalf("divider row %d = (%q,%v), want (%q, terminal background)", tc.row, got, bg, tc.marker)
+		}
+		if tc.group != "" {
+			wantFG, _, _ := config.Colorscheme[tc.group].Decompose()
+			if fg != wantFG {
+				t.Fatalf("divider row %d foreground = %v, want Micro %s %v", tc.row, fg, tc.group, wantFG)
+			}
+		}
+	}
+	leftX, rightX := app.left.view.BufView().X, app.right.view.BufView().X
+	_, terminalBG, _ := config.DefStyle.Decompose()
+	for _, x := range []int{leftX, rightX} {
+		fg, bg, _ := cellStyle(app.surface, x, 1)
+		if fg != tcell.ColorDefault || bg != terminalBG {
+			t.Fatalf("coarse changed text style = (%v,%v), want Micro default", fg, bg)
+		}
+	}
+	for _, tc := range []struct{ x, y int }{{leftX + 20, 2}, {rightX, 2}, {leftX, 3}, {rightX + 20, 3}} {
+		_, bg, _ := cellStyle(app.surface, tc.x, tc.y)
+		if bg != terminalBG {
+			t.Fatalf("spacer row background at (%d,%d) = %v, want terminal default", tc.x, tc.y, bg)
+		}
+	}
+}
+
+func lightDiffBackground(t *testing.T, kind compare.Kind, right, current bool) tcell.Color {
+	t.Helper()
+	_, bg, _ := diffStyle(kind, right, current).Decompose()
+	rgb := bg.Hex()
+	r, g, b := (rgb>>16)&0xff, (rgb>>8)&0xff, rgb&0xff
+	if (299*r+587*g+114*b)/1000 < 160 || bg == tcell.GetColor("#f0f0f0") {
+		t.Fatalf("light-theme diff background = %v, want distinct light color", bg)
+	}
+	return bg
 }
 
 func TestRenderCharacterDiffMapsTabsWideRunesAndCombiningMarks(t *testing.T) {
@@ -126,7 +565,7 @@ func TestVisibleWrappedRowRendererMatchesMicroViewportRows(t *testing.T) {
 	startLine, startCol, active := view.StartLine, view.StartCol, view.IsActive()
 	view.X, view.Y, view.Height = 0, 0, wraps+1
 	view.StartLine = display.SLoc{Line: 0}
-	view.SetActive(false)
+	view.SetActive(active)
 	previous := screen.Screen
 	app.paintScreen.Clear()
 	screen.Screen = app.paintScreen

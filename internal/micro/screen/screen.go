@@ -97,8 +97,8 @@ func UseFake() bool {
 // reset previous locations of the cursor
 // Fake cursors are also necessary to display multiple cursors
 func ShowFakeCursorMulti(x, y int) {
-	r, _, _, _ := Screen.GetContent(x, y)
-	Screen.SetContent(x, y, r, nil, config.DefStyle.Reverse(true))
+	r, combc, _, _ := Screen.GetContent(x, y)
+	Screen.SetContent(x, y, r, combc, config.DefStyle.Reverse(true))
 }
 
 // ShowCursor puts the cursor at the given location using a fake cursor

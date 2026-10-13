@@ -45,6 +45,9 @@ func (i *InfoBuf) LoadHistory() {
 // only if the savehistory option is on
 func (i *InfoBuf) SaveHistory() {
 	if config.GetGlobalOption("savehistory").(bool) {
+		if len(i.History) == 0 {
+			return
+		}
 		// Don't save history past 100
 		for k, v := range i.History {
 			if len(v) > 100 {
@@ -60,6 +63,10 @@ func (i *InfoBuf) SaveHistory() {
 		}
 
 		filename := filepath.Join(config.ConfigDir, "buffers", "history")
+		if err := os.MkdirAll(filepath.Dir(filename), 0o700); err != nil {
+			screen.TermMessage("Error preparing history directory: ", err)
+			return
+		}
 		err = util.SafeWrite(filename, buf.Bytes(), true)
 		if err != nil {
 			screen.TermMessage("Error saving history: ", err)
