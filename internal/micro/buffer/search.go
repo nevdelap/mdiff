@@ -156,19 +156,7 @@ func (b *Buffer) FindNext(s string, start, end, from Loc, down bool, useRegex bo
 		return [2]Loc{}, false, nil
 	}
 
-	var r *regexp.Regexp
-	var err error
-
-	if !useRegex {
-		s = regexp.QuoteMeta(s)
-	}
-
-	if b.Settings["ignorecase"].(bool) {
-		r, err = regexp.Compile("(?i)" + s)
-	} else {
-		r, err = regexp.Compile(s)
-	}
-
+	r, err := CompileSearchPattern(s, b.Settings["ignorecase"].(bool), useRegex)
 	if err != nil {
 		return [2]Loc{}, false, err
 	}
@@ -187,6 +175,17 @@ func (b *Buffer) FindNext(s string, start, end, from Loc, down bool, useRegex bo
 		}
 	}
 	return l, found, nil
+}
+
+// CompileSearchPattern applies Micro's literal and case settings to a search.
+func CompileSearchPattern(pattern string, ignoreCase, useRegex bool) (*regexp.Regexp, error) {
+	if !useRegex {
+		pattern = regexp.QuoteMeta(pattern)
+	}
+	if ignoreCase {
+		pattern = "(?i)" + pattern
+	}
+	return regexp.Compile(pattern)
 }
 
 // ReplaceRegex replaces all occurrences of 'search' with 'replace' in the given area

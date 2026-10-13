@@ -12,18 +12,15 @@ The result does not establish that every Micro plugin or full editor command can
 be supported. It establishes that the editing and rendering core can be composed
 with a diff-aware visual row map while preserving the no-write requirement.
 
-## Deferred findings from manual use
+## Prototype findings and later implementation status
 
-- The prototype currently compares and highlights at line granularity. The
-  product requirement is character-level diffing within changed lines, so
-  line-only replacement highlighting is incomplete. This is follow-up work and
-  was not part of TASK-002's prototype scope.
-- Manual use found that no terminal cursor was visible because the cursor was
-  positioned on the offscreen composition surface. This review finding is
-  resolved by setting or hiding the cursor on the real terminal after copying
-  composed cells. Simulation tests inspect visible, hidden, and resized cursor
-  states; the PTY test checks that resize emits a visible cursor position within
-  the new terminal bounds.
+- TASK-002 first implemented line-level highlighting; later implementation added
+  character-level changed spans. The current renderer uses those spans within
+  changed lines.
+- The first renderer prototype placed the cursor on its offscreen composition
+  surface. The current renderer sets or hides the cursor on the real terminal
+  after copying composed cells. Simulation tests cover visible, hidden, and
+  resized cursor states; the PTY test checks cursor placement after resize.
 
 ## Upstream source and package selection
 
@@ -47,9 +44,9 @@ The selected components are:
 | `internal/micro/display`                                     | Buffer viewport, wrapping, and rendering         | `BufWindow` coordinate conversion and renderer                              |
 | `internal/micro/screen`                                      | Micro's tcell screen adapter                     | Terminal lifecycle and cell API expected by Micro                           |
 | `internal/micro/pkg/highlight`                               | Syntax file parsing and matching                 | Per-buffer syntax matches                                                   |
-| `internal/micro/lua`                                         | Lua runtime used by action/config packages       | Empty runtime only; plugins are not loaded                                  |
+| `internal/micro/lua`                                         | Lua runtime used by action/config packages       | Loads Micro plugin initialization and callbacks                             |
 | `internal/micro/clipboard`, `shell`, `util`, `views`, `info` | Transitive editor support                        | Build closure; unsafe shell and file actions are filtered in this prototype |
-| `internal/micro/runtime`                                     | Built-in syntax, colorschemes, help, and plugins | Built-in syntax and colorscheme assets; Lua plugins are not executed        |
+| `internal/micro/runtime`                                     | Built-in syntax, colorschemes, help, and plugins | Built-in assets and bundled Lua plugins                                     |
 
 The Go module keeps Micro's upstream dependency versions, including its
 `github.com/sergi/go-diff/diffmatchpatch` dependency. The prototype's line
@@ -71,8 +68,8 @@ not add text to either buffer. For each aligned pair of logical lines, the
 layout uses the larger of both wrapped heights and adds continuation spacers to
 the shorter side. Both panes index the same top visual row. The adapter maps
 cursor positions and preserves scroll anchors in that coordinate space after
-edits, resize, or a change in wrap geometry. Manual use later showed no visible
-terminal cursor, so cursor display remains unresolved.
+edits, resize, or a change in wrap geometry. The cursor is placed on the real
+terminal after composition at the focused pane's rendered position.
 
 This arrangement does temporarily swap Micro's global `screen.Screen` while
 painting. The terminal event goroutine therefore captures its terminal screen
@@ -95,9 +92,16 @@ behavioral patches are:
 | `internal/micro/action/actions.go`  | Nil-checks `InfoBar` after clipboard paste.                                                                                                                                                                                                  | The standalone prototype does not create Micro's full tabbed info bar.                                 |
 
 No upstream checkout or source repository is modified. The pinned license files
-remain with the copied source. A refresh must re-run the import rewrite, review
-these patches against the new upstream source, and repeat the package compile,
-simulation, and PTY checks.
+remain with the copied source. To refresh, check out the exact upstream Micro
+tag and commit recorded above; copy the production dependency closure, runtime
+assets, tests, and notices; re-run the import rewrite; then review and re-apply
+the four behavioral patches listed above against the new upstream files. Do not
+replace `internal/micro/LICENSE` or `LICENSE-THIRD-PARTY` with mdiff's license
+text. Compare the refreshed tree against the previous pin with
+`jj diff --summary` and `difft` where available, record the new upstream commit
+and changed patch inventory here, and run the vendored package tests, simulation
+tests, and PTY checks. This procedure keeps upstream notices with the copied
+code and makes patch review repeatable.
 
 ## Compatibility limits discovered in the prototype
 
@@ -111,10 +115,11 @@ simulation, and PTY checks.
   binding whose action is unsupported is ignored by the prototype's filtered
   action map. `F6` is reserved by mdiff for pane focus; Micro's `Tab` binding
   remains available for indentation and completion.
-- Lua is initialized because Micro action packages require it, but the prototype
-  does not load installed plugins or run plugin lifecycle callbacks. Plugins can
-  assume a Micro `Tab`, `InfoBar`, file-backed buffer, or writable configuration
-  directory, so claiming plugin compatibility here would be misleading.
+- Lua is initialized and configured plugins load from Micro's normal locations.
+  Compatibility is limited to APIs available in the two-pane session: plugins
+  that require tabs, extra panes, independent vertical views, or writable
+  configuration can fail or report the operation unavailable. Plugins are
+  trusted code and are not sandboxed.
 - Buffer actions report through the initialized in-memory `InfoBar`. The two
   panes suppress their status lines and use an mdiff footer.
 - Micro's renderer owns per-window horizontal state. The prototype keeps that

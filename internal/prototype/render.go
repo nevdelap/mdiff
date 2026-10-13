@@ -33,16 +33,6 @@ type renderedRowKey struct{ line, wrapRow int }
 func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 	cache := make(map[renderedRowKey][]renderedCell)
 	masks := make(map[int]renderedLine)
-	cursorRow, cursorCol := -1, -1
-	if a.focusedPane() == p {
-		loc := p.h.Cursor.Loc
-		visual := p.view.VLocFromLoc(loc)
-		cursorRow = layout.CursorRow(a.focus, loc.Y, visual.Row) - top
-		cursorCol = p.view.BufView().X + visual.VisualX - p.view.StartCol - p.x
-		if cursorCol < 0 || cursorCol >= p.width {
-			cursorCol = -1
-		}
-	}
 	for screenY := 0; screenY < height; screenY++ {
 		rowIndex := top + screenY
 		if rowIndex >= len(layout.Rows) {
@@ -54,10 +44,18 @@ func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 		if p.x != 0 {
 			cell = row.Right
 		}
+		currentLine := p.view.IsActive() && cell.Line >= 0 &&
+			p.buf.Settings["cursorline"].(bool) && p.h.Cursor.Y == cell.Line &&
+			!p.h.Cursor.HasSelection()
 		base := config.DefStyle
 		different := row.Kind != compare.Equal
 		if different {
-			base = diffStyle(row.Kind, p.x != 0)
+			base = diffStyle(row.Kind, p.x != 0, currentLine)
+		} else if currentLine {
+			if style, ok := config.Colorscheme["cursor-line"]; ok {
+				color, _, _ := style.Decompose()
+				base = base.Background(color)
+			}
 		}
 		clearRow(p, screenY, base)
 		if cell.Spacer || cell.Continuation || cell.Line < 0 {
@@ -84,12 +82,8 @@ func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 				masks[cell.Line] = line
 			}
 		}
-		visibleCursorCol := -1
-		if cursorRow == screenY {
-			visibleCursorCol = cursorCol
-		}
 		lineMasks := masks[cell.Line]
-		copyLine(p, screenY, cells, base, row, p.x != 0, different, visibleCursorCol, lineMasks.changed, lineMasks.selected)
+		copyLine(p, screenY, cells, base, row, p.x != 0, different, lineMasks.changed, lineMasks.selected)
 	}
 }
 
@@ -111,11 +105,13 @@ func (a *App) renderMicroRow(p *pane, line, wrapRow int, annotate bool) []render
 	startLine, startCol, active := view.StartLine, view.StartCol, view.IsActive()
 	view.X, view.Y, view.Height = 0, 0, 2
 	view.StartLine = display.SLoc{Line: line, Row: wrapRow}
-	view.SetActive(false)
+	view.SetActive(active)
 	compositionScreen := screen.Screen
 	a.paintScreen.Clear()
 	screen.Screen = a.paintScreen
+	view.SuppressCursor = true
 	view.Display()
+	view.SuppressCursor = false
 
 	row := make([]renderedCell, p.width)
 	for col := 0; col < p.width; col++ {
@@ -136,15 +132,65 @@ func (a *App) renderMicroRow(p *pane, line, wrapRow int, annotate bool) []render
 	return row
 }
 
-func diffStyle(kind compare.Kind, right bool) tcell.Style {
-	background := tcell.ColorDarkBlue
+func diffStyle(kind compare.Kind, right, currentLine bool) tcell.Style {
+	group := "mdiff.diff.changed"
+	background := tcell.NewHexColor(0x000046)
+	currentBackground := tcell.ColorDarkBlue
+	lightAccent := int32(0x2680D9)
 	if kind == compare.Spacer {
-		background = tcell.ColorDarkRed
+		group = "mdiff.diff.left-only"
+		background = tcell.NewHexColor(0x460000)
+		currentBackground = tcell.ColorDarkRed
+		lightAccent = 0xD64A4A
 		if right {
-			background = tcell.ColorDarkGreen
+			group = "mdiff.diff.right-only"
+			background = tcell.NewHexColor(0x003200)
+			currentBackground = tcell.ColorDarkGreen
+			lightAccent = 0x2F9E5B
 		}
 	}
-	return config.DefStyle.Background(background)
+	_, themeBackground, _ := config.DefStyle.Decompose()
+	if themeBackground.Hex() < 0 {
+		// A terminal-default background may be light or dark. Keep its colors
+		// unless the selected Micro theme explicitly sets an mdiff row color.
+		background = themeBackground
+		currentBackground = themeBackground
+	} else if lightBackground, ok := lightThemeBackground(); ok {
+		background = blendColor(lightBackground, lightAccent, 15)
+		currentBackground = blendColor(lightBackground, lightAccent, 35)
+	}
+	if currentLine {
+		return themedRowBackground(group+".current", currentBackground)
+	}
+	return themedRowBackground(group, background)
+}
+
+func lightThemeBackground() (tcell.Color, bool) {
+	_, background, _ := config.DefStyle.Decompose()
+	rgb := background.Hex()
+	if rgb < 0 {
+		return 0, false
+	}
+	r, g, b := (rgb>>16)&0xff, (rgb>>8)&0xff, rgb&0xff
+	return background, (299*r+587*g+114*b)/1000 >= 160
+}
+
+func blendColor(background tcell.Color, accent int32, percent int32) tcell.Color {
+	base := background.Hex()
+	channel := func(shift uint) int32 {
+		b := (base >> shift) & 0xff
+		a := (accent >> shift) & 0xff
+		return (b*(100-percent) + a*percent + 50) / 100
+	}
+	return tcell.NewRGBColor(channel(16), channel(8), channel(0))
+}
+
+func themedRowBackground(group string, fallback tcell.Color) tcell.Style {
+	if style, ok := config.Colorscheme[group]; ok {
+		_, background, _ := style.Decompose()
+		return config.DefStyle.Background(background)
+	}
+	return config.DefStyle.Background(fallback)
 }
 
 func annotateSourceRunes(p *pane, line int, rows [][]renderedCell, rowOffset int) {
@@ -368,24 +414,17 @@ func clearRow(p *pane, screenY int, style tcell.Style) {
 	}
 }
 
-func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, row viewport.Row, right, different bool, cursorCol int, changed, selected []bool) {
+func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, row viewport.Row, right, different bool, changed, selected []bool) {
 	for x, cell := range cells {
 		if cell.width == 0 {
 			continue
 		}
 		style := baseCellStyle(cell.style, rowStyle)
-		if different {
-			_, background, _ := rowStyle.Decompose()
-			style = style.Background(background)
-		}
 		if different && cell.sourceRune >= 0 && cell.sourceRune < len(changed) && changed[cell.sourceRune] {
 			style = characterDiffStyle(rowStyle, right)
 		}
 		if cell.sourceRune >= 0 && cell.sourceRune < len(selected) && selected[cell.sourceRune] {
 			style = selectionStyle()
-		}
-		if cursorCol >= 0 && x == cursorCol && !p.h.Cursor.HasSelection() {
-			style = style.Reverse(true)
 		}
 		screen.SetContent(p.x+x, screenY, cell.rune, cell.combc, style)
 	}

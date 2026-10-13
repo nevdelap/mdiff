@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/micro-editor/tcell/v2"
+	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
 	"github.com/nevdelap/mdiff/internal/micro/screen"
@@ -23,6 +24,7 @@ func TestMicroSettingsApplyToBothPanesAndRemainReadOnly(t *testing.T) {
   "relativeruler": true,
   "savecursor": true,
   "saveundo": true,
+  "keymenu": true,
   "filetype": "go",
   "colorscheme": "monokai",
   "ftoptions": false,
@@ -99,6 +101,83 @@ func TestMicroSettingsApplyToBothPanesAndRemainReadOnly(t *testing.T) {
 	entries, err := os.ReadDir(configDir)
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("startup created config artifacts: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestMissingDefaultConfigDirectoryIsCreatedAndHistoryCanPersist(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "nested", "micro")
+	t.Setenv("MICRO_CONFIG_HOME", configDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "other"))
+	sim := tcell.NewSimulationScreen("")
+	if err := sim.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sim.SetSize(80, 10)
+	app, err := New(sim, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.ConfigDir != configDir {
+		t.Fatalf("config directory = %q, want %q", config.ConfigDir, configDir)
+	}
+	if info, err := os.Stat(configDir); err != nil || !info.IsDir() {
+		t.Fatalf("default config directory was not created: %v, %v", info, err)
+	}
+	action.InfoBar.AddToHistory("command", "pwd")
+	app.Close()
+	if _, err := os.Stat(filepath.Join(configDir, "buffers", "history")); err != nil {
+		t.Fatalf("history could not persist in newly created config directory: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "other")); !os.IsNotExist(err) {
+		t.Fatalf("lower-priority XDG directory was created: %v", err)
+	}
+}
+
+func TestDefaultConfigDirectoryResolutionAndCreation(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MICRO_CONFIG_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "xdg"))
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	xdgDir := filepath.Join(root, "xdg", "micro")
+	if err := setConfigDir(""); err != nil {
+		t.Fatal(err)
+	}
+	if config.ConfigDir != xdgDir {
+		t.Fatalf("XDG config directory = %q, want %q", config.ConfigDir, xdgDir)
+	}
+	if info, err := os.Stat(xdgDir); err != nil || !info.IsDir() {
+		t.Fatalf("XDG config directory was not created: %v, %v", info, err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", "")
+	homeDir := filepath.Join(root, "home", ".config", "micro")
+	if err := setConfigDir(""); err != nil {
+		t.Fatal(err)
+	}
+	if config.ConfigDir != homeDir {
+		t.Fatalf("home config directory = %q, want %q", config.ConfigDir, homeDir)
+	}
+	if info, err := os.Stat(homeDir); err != nil || !info.IsDir() {
+		t.Fatalf("home config directory was not created: %v, %v", info, err)
+	}
+	missingExplicit := filepath.Join(root, "explicit")
+	if err := setConfigDir(missingExplicit); err == nil || !strings.Contains(err.Error(), "must already exist") {
+		t.Fatalf("missing explicit config directory error = %v", err)
+	}
+	if _, err := os.Stat(missingExplicit); !os.IsNotExist(err) {
+		t.Fatalf("missing explicit config directory was created: %v", err)
+	}
+}
+
+func TestDefaultConfigDirectoryCreationFailureIsReported(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "file")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MICRO_CONFIG_HOME", filepath.Join(blocked, "micro"))
+	if err := setConfigDir(""); err == nil || !strings.Contains(err.Error(), "create Micro config directory") {
+		t.Fatalf("config directory creation error = %v", err)
 	}
 }
 

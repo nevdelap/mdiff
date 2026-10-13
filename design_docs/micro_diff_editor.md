@@ -41,7 +41,7 @@ real Micro editing behavior and avoids a process boundary, while keeping Micro
 changes reviewable and upstream synchronization possible. The initial prototype
 must test this choice before the rest of the design is committed.
 
-For line diffing, use Micro's already-declared
+For logical-line alignment, use Micro's already-declared
 `github.com/sergi/go-diff/diffmatchpatch` dependency at line granularity. It is
 an established Go implementation already used in Micro's buffer code. Convert
 its operation stream into an immutable alignment map; do not use Micro's
@@ -76,8 +76,9 @@ Git-specific workflow is required.
   directory where their behavior is compatible with this application.
 - Accept terminal-native paste in either focused pane and retain independently
   editable buffers.
-- Continuously show line-level additions, deletions, and replacements, using
-  virtual rows for unmatched lines without changing either text buffer.
+- Show line additions, deletions, and replacements with character-level spans
+  inside changed lines. Use virtual rows for unmatched lines without changing
+  either text buffer.
 - Keep both panes aligned under scrolling, cursor navigation, difference
   navigation, mouse wheel input, wrapping, and terminal resize.
 - Use Micro's file lifecycle for each pane, including per-pane filenames,
@@ -398,8 +399,8 @@ A separate process running stock `micro` cannot satisfy the integration
 contract: its buffers, actions, panes, styles, and renderer are not exported as
 a stable embedding API, and terminal output from another process cannot provide
 accurate virtual alignment. A new TUI built from scratch would reproduce
-substantial editor behavior and still would not load Micro Lua plugins
-compatibly.
+substantial editor behavior and would need a second implementation of Micro's
+plugin host APIs to offer comparable Lua plugin behavior.
 
 A Go module cannot import `github.com/zyedidia/micro/v2/internal/...` from an
 unrelated module. Copying or vendoring those files under the original import
@@ -552,7 +553,7 @@ override lives in a namespaced `mdiff` object in Micro's `settings.json`; the
 
 | Micro feature                | Observed behavior                                                                                                                                                                                                                                        | Status and limitation                                                                                                                                                                                                                                                                   |
 | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Config directory             | `--config-dir`, `MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime files override embedded files.                                                                                                                       | Supported. Missing config directories are not created.                                                                                                                                                                                                                                  |
+| Config directory             | `--config-dir`, `MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`; user runtime files override embedded files.                                                                                                                       | Supported. A missing selected default directory is created on startup; explicit `--config-dir` paths must already exist.                                                                                                                                                                |
 | `settings.json`              | Micro options initialize both panes. Tested: indentation, tab size, wrapping, ruler/relative ruler, filetype, colorscheme, and `mdiff.diff-debounce-ms`; CLI debounce wins.                                                                              | Partial. Pane/viewport-incompatible or unimplemented UI options have no effect. Malformed JSON fails before terminal mode.                                                                                                                                                              |
 | `bindings.json`              | Micro buffer bindings load through Micro parsing. Supported shortcut labels follow remaps and omit removed/unavailable actions.                                                                                                                          | Partial. Shell, unknown actions, lifecycle-breaking actions, and private-view `ScrollUp`, `ScrollDown`, `Center`, `Start`, `End`, `PageUp`, `PageDown`, `HalfPageUp`, and `HalfPageDown` actions are rejected. Loaded Lua plugin actions are supported; mdiff-owned keys stay reserved. |
 | `colorschemes/`              | The configured scheme styles syntax and UI; shortcut rows use Micro's `message` style, with the normal Micro default style when absent. Plugins may register a runtime scheme during initialization.                                                     | Supported for valid bundled/user/plugin schemes. Missing or malformed selected schemes abort startup after plugin initialization and restore the terminal. Diff styles have fallbacks.                                                                                                  |
@@ -561,14 +562,15 @@ override lives in a namespaced `mdiff` object in Micro's `settings.json`; the
 | Micro commands and clipboard | Supported commands and Micro clipboard methods work in the focused pane.                                                                                                                                                                                 | Partial. Shell, tab/window, and independent viewport operations are unavailable or adapted; external clipboard depends on platform tools.                                                                                                                                               |
 | Bottom menu and pane status  | Micro order and separators, supported remapped labels, active statusline colors, and Micro pane status fields are retained.                                                                                                                              | Partial. mdiff controls stay reserved; New Tab replaces the focused document to preserve two panes.                                                                                                                                                                                     |
 
-mdiff does not create config defaults or serialize buffer state into the Micro
-config directory. `savecursor` and `saveundo` state serialization is disabled.
-Micro plugins run with their normal filesystem, process, and network access, so
-they may create or modify files as configured; no mdiff plugin sandbox or opt-in
-is provided. Startup does not create a missing `bindings.json`, but a plugin's
-explicit `TryBindKey` call has Micro's normal persistence behavior and writes
-the binding. Plugin operations that create tabs/panes or independent layouts are
-reported as unavailable to preserve the two-pane shared viewport.
+mdiff creates a missing selected default config directory but does not copy
+config defaults over user files. Configured `savecursor` and `saveundo` state
+serialization remains available. Micro plugins run with their normal filesystem,
+process, and network access, so they may create or modify files as configured;
+no mdiff plugin sandbox or opt-in is provided. Startup does not create a missing
+`bindings.json`, but a plugin's explicit `TryBindKey` call has Micro's normal
+persistence behavior and writes the binding. Plugin operations that create
+tabs/panes or independent layouts are reported as unavailable to preserve the
+two-pane shared viewport.
 
 ### Micro-style status lines and key menu
 
@@ -1119,16 +1121,16 @@ integration commitment.
 
 ### Phase 1: Integration and scroll prototype (complete in TASK-002)
 
-The completed prototype is documented in
+The original TASK-002 prototype is documented in
 [`micro_integration_prototype.md`](micro_integration_prototype.md). It has two
 empty transient Micro buffers, one tcell terminal, virtual spacers, shared
 visual rows, cursor rendering, bracketed paste, and resize coverage. A review
 found and fixed the terminal cursor handoff, with simulation and PTY regressions
-for its real terminal position. Character-level diffing is also required
-follow-up work; this prototype compares lines only. The exit gate passed for the
-shared-row architecture without replacing most of `BufWindow`. The remaining
-phases extend this proof with versioned diffing, character-span rendering,
-broader configuration compatibility, performance work, and release readiness.
+for its real terminal position. Character-level diffing was follow-up work at
+that milestone; TASK-003 later added character-span rendering. The exit gate
+passed for the shared-row architecture without replacing most of `BufWindow`.
+Later tasks added versioned diffing, broader configuration and plugin support,
+per-pane file workflows, performance work, and release checks.
 
 ### Phase 2: Character diff and responsive comparison (TASK-003–TASK-004)
 

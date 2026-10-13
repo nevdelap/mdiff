@@ -1,10 +1,18 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 # Keep uv's mutable formatter cache outside the repository.
+
 UV_CACHE_DIR := "/tmp/mdiff-uv-cache"
 UV_TOOL_DIR := "/tmp/mdiff-uv-tools"
 GOLANGCI_LINT_VERSION := "v2.14.0"
+GOVULNCHECK_VERSION := "v1.1.4"
+GO_LICENSES_VERSION := "v2.0.1"
+GO_AUDIT_TOOLCHAIN := "go1.26.9"
+AUDIT_TOOL_DIR := "/tmp/mdiff-audit-tools"
 APP_PACKAGES := "./cmd/mdiff ./internal/compare ./internal/prototype ./internal/viewport"
+YAMLFMT_IMAGE := "ghcr.io/google/yamlfmt@sha256:015f4f1e818b38cb72bec2d4baa5d312d3a5f40c6c22ff3fef35a5415095b7f2"
+YAMLLINT_IMAGE := "ghcr.io/ffurrer2/yamllint@sha256:620b5a6c900362cdcd6b98eabaac2dd8febc595f3b64d9854f546b307dca3183"
+MARKDOWNLINT_IMAGE := "ghcr.io/igorshubovych/markdownlint-cli@sha256:905baf9f6bd11da2ede8c394882c616509385f24b8b8d54fff6e111be88f39de"
 
 # Show available recipes when Just is invoked without a recipe.
 @_:
@@ -24,8 +32,8 @@ install-tools:
 # Format Go, Markdown, and this Justfile.
 format:
     go fmt ./...
-    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat README.md docs design_docs
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir ghcr.io/google/yamlfmt:latest .github/workflows/ci.yml .github/dependabot.yml
+    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat README.md docs design_docs review_docs/project_review_2026-10-13.md review_docs/micro_behavior_compatibility_review_2026-10-13.md
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir {{ YAMLFMT_IMAGE }} .github/workflows/ci.yml .github/dependabot.yml
     just --fmt --unstable
 
 # Verify source and documentation formatting without rewriting files.
@@ -41,8 +49,8 @@ format-check:
             exit 1
         fi
     fi
-    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat --check README.md docs design_docs
-    docker run --rm -v "$(pwd):/workdir" -w /workdir ghcr.io/google/yamlfmt:latest -lint .github/workflows/ci.yml .github/dependabot.yml
+    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat --check README.md docs design_docs review_docs/project_review_2026-10-13.md review_docs/micro_behavior_compatibility_review_2026-10-13.md
+    docker run --rm -v "$(pwd):/workdir" -w /workdir {{ YAMLFMT_IMAGE }} -lint .github/workflows/ci.yml .github/dependabot.yml
     just --fmt --check --unstable
 
 # Lint Go source and Markdown.
@@ -55,11 +63,11 @@ lint:
 
 # Lint workflow YAML.
 lint-yaml:
-    docker run --rm -v "$(pwd):/workdir" -w /workdir ghcr.io/ffurrer2/yamllint:latest .github/workflows/ci.yml .github/dependabot.yml
+    docker run --rm -v "$(pwd):/workdir" -w /workdir {{ YAMLLINT_IMAGE }} .github/workflows/ci.yml .github/dependabot.yml
 
 # Lint Markdown using the same containerized tool as the stay project.
 lint-markdown:
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir ghcr.io/igorshubovych/markdownlint-cli:latest README.md docs design_docs
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir {{ MARKDOWNLINT_IMAGE }} README.md docs design_docs review_docs
 
 # Run the complete Go test suite.
 test:
@@ -72,6 +80,32 @@ test-pty:
 # Run Go tests with the race detector.
 test-race:
     go test -race ./...
+
+# Run a bounded campaign from the checked-in comparison fuzz seeds.
+test-fuzz:
+    go test ./internal/compare -run '^$' -fuzz '^FuzzDiffLineSpansReconstructRight$' -fuzztime=30s -parallel=2
+
+# Measure app and copied Micro code reached by in-process integration tests.
+coverage-integration:
+    go test ./internal/prototype -coverpkg=./internal/prototype/...,./internal/compare/...,./internal/viewport/...,./internal/micro/... -coverprofile=/tmp/mdiff-integration-coverage.out
+    go tool cover -func=/tmp/mdiff-integration-coverage.out
+
+# Check Go dependencies for known vulnerabilities and forbidden/unknown licenses.
+audit:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export GOTOOLCHAIN={{ GO_AUDIT_TOOLCHAIN }}
+    export GOFLAGS=-buildvcs=false
+    mkdir -p {{ AUDIT_TOOL_DIR }}
+    if [[ ! -x "{{ AUDIT_TOOL_DIR }}/govulncheck" ]]; then
+        GOBIN={{ AUDIT_TOOL_DIR }} go install golang.org/x/vuln/cmd/govulncheck@{{ GOVULNCHECK_VERSION }}
+    fi
+    if [[ ! -x "{{ AUDIT_TOOL_DIR }}/go-licenses" ]]; then
+        GOBIN={{ AUDIT_TOOL_DIR }} go install github.com/google/go-licenses/v2@{{ GO_LICENSES_VERSION }}
+    fi
+    {{ AUDIT_TOOL_DIR }}/govulncheck ./...
+    GOTOOLCHAIN=local {{ AUDIT_TOOL_DIR }}/go-licenses check --include_tests ./...
+    GOTOOLCHAIN=local {{ AUDIT_TOOL_DIR }}/go-licenses report --include_tests ./...
 
 # Run deterministic performance fixtures; output stays outside the source tree.
 bench:
@@ -90,9 +124,14 @@ build:
 build-release:
     go build -buildvcs=false -trimpath -ldflags="-s -w" -o bin/mdiff ./cmd/mdiff
 
-# Run the terminal editor prototype.
+# Run the terminal editor.
+[positional-arguments]
 run *args:
-    go run -buildvcs=false ./cmd/mdiff -- {{ args }}
+    go run -buildvcs=false ./cmd/mdiff "$@"
+
+# Check that the run recipe preserves CLI arguments and paths with spaces.
+test-run-args:
+    bash scripts/check-run-args.sh
 
 # Run the fast local quality and test gate.
 check-fast:

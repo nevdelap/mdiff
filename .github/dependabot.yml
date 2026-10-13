@@ -5,6 +5,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: github.com/micro-editor/tcell/v2
+        versions:
+          - ">= 2.1.0"
   - package-ecosystem: github-actions
     directory: /
     schedule:

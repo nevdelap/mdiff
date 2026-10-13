@@ -30,6 +30,13 @@ var BufBindings *KeyTree
 // The application can surface a concise explanation when the user invokes one.
 var RejectedBufferBindings map[string]string
 
+// MdiffAction adapts actions that need the application's two-pane workflow.
+// A handled action must return true; other actions retain Micro's behavior.
+var MdiffAction func(string, *BufPane) bool
+
+// MdiffCommand validates and runs commands from both the prompt and bindings.
+var MdiffCommand func(*BufPane, string)
+
 // BufKeyActionGeneral makes a general pane action from a BufKeyAction.
 func BufKeyActionGeneral(a BufKeyAction) PaneKeyAction {
 	return func(p Pane) bool {
@@ -95,6 +102,7 @@ func LuaAction(fn string, k Event) BufAction {
 // BufMapEvent maps an event to an action
 func BufMapEvent(k Event, action string) {
 	requested := action
+	delete(RejectedBufferBindings, k.Name())
 	config.Bindings["buffer"][k.Name()] = action
 
 	var actionfns []BufAction
@@ -115,7 +123,7 @@ func BufMapEvent(k Event, action string) {
 			types = append(types, ' ')
 			action = ""
 		}
-		if strings.HasPrefix(a, "command:") || strings.HasPrefix(a, "command-edit:") || prototypeUnsafeAction(a) {
+		if prototypeUnsafeAction(a) {
 			RejectedBufferBindings[k.Name()] = requested
 			return
 		}
@@ -206,6 +214,11 @@ func RejectedBufferBindingForKey(e *tcell.EventKey) string {
 	return RejectedBufferBindings[keyEvent(e).Name()]
 }
 
+// RejectedBufferBindingForRaw reports a disabled escape-sequence binding.
+func RejectedBufferBindingForRaw(e *tcell.EventRaw) string {
+	return RejectedBufferBindings[e.EscSeq()]
+}
+
 // BufferKeyName exposes Micro's canonical key name for mdiff-owned routing.
 func BufferKeyName(e *tcell.EventKey) string { return keyEvent(e).Name() }
 
@@ -227,16 +240,10 @@ func RejectedBufferSequenceState(sequence string) (action string, exact, prefix 
 }
 
 func prototypeUnsafeAction(name string) bool {
-	return name == "Save" || name == "SaveAll" || name == "SaveAs" ||
-		name == "OpenFile" || name == "Quit" || name == "QuitAll" ||
-		name == "ForceQuit" || name == "ShellMode" || name == "CommandMode" ||
-		name == "Suspend" || name == "ToggleHelp" || name == "ToggleKeyMenu" ||
-		name == "Unsplit" || name == "ScrollUp" || name == "ScrollDown" || name == "Center" ||
-		name == "Start" || name == "End" || name == "PageUp" || name == "PageDown" ||
-		name == "HalfPageUp" || name == "HalfPageDown" ||
+	return name == "Suspend" || name == "ShellMode" ||
+		name == "Unsplit" ||
 		name == "PreviousTab" || name == "NextTab" || name == "FirstTab" || name == "LastTab" ||
-		name == "NextSplit" || name == "PreviousSplit" || name == "FirstSplit" || name == "LastSplit" ||
-		strings.HasPrefix(name, "AddTab") ||
+		(name != "AddTab" && strings.HasPrefix(name, "AddTab")) ||
 		strings.HasPrefix(name, "VSplit") || strings.HasPrefix(name, "HSplit")
 }
 
@@ -264,6 +271,8 @@ type BufPane struct {
 	// PromptBufferName optionally supplies an application-specific buffer label
 	// for Micro's save-before-close prompt.
 	PromptBufferName func() string
+	// MouseLoc resolves an mdiff-aligned screen row to a buffer location.
+	MouseLoc func(*tcell.EventMouse) buffer.Loc
 	// Bindings stores the association of key events and actions
 	bindings *KeyTree
 
@@ -433,6 +442,14 @@ func (h *BufPane) GotoLoc(loc buffer.Loc) {
 	h.Relocate()
 }
 
+func (h *BufPane) mouseLocation(e *tcell.EventMouse) buffer.Loc {
+	if h.MouseLoc != nil {
+		return h.MouseLoc(e)
+	}
+	x, y := e.Position()
+	return h.LocFromVisual(buffer.Loc{X: x, Y: y})
+}
+
 func (h *BufPane) initialRelocate() {
 	sloc := h.SLocFromLoc(h.Cursor.Loc)
 	height := h.BufView().Height
@@ -482,7 +499,7 @@ func (h *BufPane) getReloadSetting() string {
 
 // HandleEvent executes the tcell event properly
 func (h *BufPane) HandleEvent(event tcell.Event) {
-	if h.Buf.ExternallyModified() && !h.Buf.ReloadDisabled {
+	if h.Buf.ExternallyModified() && !h.Buf.ReloadDisabled && !mdiffFileActionEvent(event) {
 		reload := h.getReloadSetting()
 
 		if reload == "prompt" {
@@ -537,7 +554,9 @@ func (h *BufPane) HandleEvent(event tcell.Event) {
 			if isDrag {
 				me.state = MouseDrag
 			}
-			h.DoMouseEvent(me, e)
+			if !rejectMouseEvent(me) {
+				h.DoMouseEvent(me, e)
+			}
 		} else {
 			// Mouse event with no click - mouse was just released.
 			// If there were multiple mouse buttons pressed, we don't know which one
@@ -547,7 +566,9 @@ func (h *BufPane) HandleEvent(event tcell.Event) {
 				delete(h.mousePressed, me)
 
 				me.state = MouseRelease
-				h.DoMouseEvent(me, e)
+				if !rejectMouseEvent(me) {
+					h.DoMouseEvent(me, e)
+				}
 			}
 			if !pressed {
 				// Propagate the mouse release in case the press wasn't for this BufPane
@@ -580,6 +601,34 @@ func (h *BufPane) HandleEvent(event tcell.Event) {
 			c.NewTrailingWsY = -1
 		}
 	}
+}
+
+func rejectMouseEvent(event MouseEvent) bool {
+	if rejected := RejectedBufferBindings[event.Name()]; rejected != "" {
+		if InfoBar != nil {
+			InfoBar.Error(rejected + " is unavailable in mdiff")
+		}
+		return true
+	}
+	return false
+}
+
+func mdiffFileActionEvent(event tcell.Event) bool {
+	if MdiffAction == nil {
+		return false
+	}
+	key, ok := event.(*tcell.EventKey)
+	if !ok {
+		return false
+	}
+	binding := config.Bindings["buffer"][keyEvent(key).Name()]
+	for _, actionName := range strings.FieldsFunc(binding, func(r rune) bool { return r == '|' || r == '&' || r == ',' }) {
+		switch actionName {
+		case "Save", "SaveAll", "SaveAs", "OpenFile", "Quit", "QuitAll", "ForceQuit", "AddTab":
+			return true
+		}
+	}
+	return false
 }
 
 // Bindings returns the current bindings tree for this buffer.
@@ -618,11 +667,15 @@ func (h *BufPane) execAction(action BufAction, name string, te *tcell.EventMouse
 	}
 
 	var success bool
-	switch a := action.(type) {
-	case BufKeyAction:
-		success = a(h)
-	case BufMouseAction:
-		success = a(h, te)
+	if MdiffAction != nil && MdiffAction(name, h) {
+		success = true
+	} else {
+		switch a := action.(type) {
+		case BufKeyAction:
+			success = a(h)
+		case BufMouseAction:
+			success = a(h, te)
+		}
 	}
 	success = success && h.PluginCB("on"+name, te)
 

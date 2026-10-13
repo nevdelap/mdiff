@@ -3,8 +3,11 @@ name: CI
 "on":
   push:
     branches:
-      - main
+      - '**'
   pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * 1'
 permissions:
   contents: read
 jobs:
@@ -31,6 +34,39 @@ jobs:
             github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
       - name: Run formatting and lint checks
         run: just --no-deps lint
+      - name: Check Just run argument forwarding
+        run: just --no-deps test-run-args
+  race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Install Just
+        uses: taiki-e/install-action@just
+      - name: Run race detector
+        run: just --no-deps test-race
+  fuzz:
+    if: github.event_name != 'push' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Install Just
+        uses: taiki-e/install-action@just
+      - name: Run seeded comparison fuzz campaign
+        run: just --no-deps test-fuzz
   build-and-test:
     strategy:
       fail-fast: false
@@ -55,6 +91,8 @@ jobs:
         uses: taiki-e/install-action@just
       - name: Run Go tests
         run: just --no-deps test
+      - name: Run PTY terminal checks
+        run: just --no-deps test-pty
       - name: Check Go vet
         run: just --no-deps vet
       - name: Build command
@@ -62,4 +100,82 @@ jobs:
       - name: Smoke test command
         run: |
           output="$(go run -buildvcs=false ./cmd/mdiff --version)"
-          test "$output" = "mdiff prototype (Micro v2.0.15)"
+          case "$output" in
+            'mdiff (wrapping micro) '*) ;;
+            *) echo "unexpected version output: $output" >&2; exit 1 ;;
+          esac
+          go run -buildvcs=false ./cmd/mdiff --help >/dev/null
+  dependency-audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Install Just
+        uses: taiki-e/install-action@just
+      - name: Audit Go dependencies
+        run: just --no-deps audit
+  reproducible-release-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux/amd64
+          - os: macos-15
+            target: darwin/arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Install pinned Go toolchain
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.9"
+          cache: true
+      - name: Verify same-runner release build reproducibility
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          test "$(go env GOOS)/$(go env GOARCH)" = "$EXPECTED_TARGET"
+          tmp="$(mktemp -d "$RUNNER_TEMP/mdiff-release.XXXXXX")"
+          trap 'rm -rf "$tmp"' EXIT
+          echo "Revision: $GITHUB_SHA"
+          echo "Go toolchain: $(go version)"
+          echo "Target: $EXPECTED_TARGET"
+          build_release() {
+            go build \
+              -buildvcs=false \
+              -trimpath \
+              -ldflags="-s -w" \
+              -o "$1" \
+              ./cmd/mdiff
+          }
+          echo 'Command: go build -buildvcs=false -trimpath -ldflags="-s -w"'
+          echo '         -o <tmp>/mdiff ./cmd/mdiff (run twice)'
+          build_release "$tmp/mdiff-first"
+          build_release "$tmp/mdiff-second"
+          cmp "$tmp/mdiff-first" "$tmp/mdiff-second"
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            digest="$(shasum -a 256 "$tmp/mdiff-first")"
+          else
+            digest="$(sha256sum "$tmp/mdiff-first")"
+          fi
+          digest="${digest%% *}"
+          echo "Verified SHA-256: $digest"
+          command='go build -buildvcs=false -trimpath'
+          command+=' -ldflags="-s -w" -o <tmp>/mdiff ./cmd/mdiff'
+          {
+            printf '### Reproducible release build (%s)\n' "$EXPECTED_TARGET"
+            printf -- '- Revision: `%s`\n' "$GITHUB_SHA"
+            printf -- '- Toolchain: `%s`\n' "$(go version)"
+            printf -- '- Command: `%s`; run twice, `cmp` passed\n' "$command"
+            printf -- '- SHA-256: `%s`\n' "$digest"
+          } >> "$GITHUB_STEP_SUMMARY"

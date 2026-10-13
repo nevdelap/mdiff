@@ -8,10 +8,172 @@ import (
 	"time"
 
 	"github.com/micro-editor/tcell/v2"
+	"github.com/nevdelap/mdiff/internal/compare"
 	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
+
+func TestFileStartupBuildsCompleteFirstDraw(t *testing.T) {
+	cases := []struct {
+		name, left, right string
+		rightFile         bool
+		wantSpacer        bool
+		first, last       string
+	}{
+		{"insertion", "common\nleft two\nleft three\nLEFT_LAST", "common\nRIGHT_INSERT\nleft two\nleft three\nLEFT_LAST", true, true, "common", "LEFT_LAST"},
+		{"unchanged", "common\nsecond\nthird\nLEFT_LAST", "common\nsecond\nthird\nLEFT_LAST", true, false, "common", "LEFT_LAST"},
+		{"one file", "common\nsecond\nthird\nLEFT_LAST", "", false, false, "common", "LEFT_LAST"},
+		{"repeated blocks", "first\nrepeat\na\nrepeat\nb\nrepeat\nLAST", "first\nrepeat\nb\nrepeat\na\nrepeat\nLAST", true, false, "first", "LAST"},
+		{"reordered blocks", "first\nred\nblue\ngreen\nLAST", "first\ngreen\nred\nblue\nLAST", true, false, "first", "LAST"},
+		{"unicode change", "first\ncafé\n東京\nLAST", "first\ncafe\n京都\nLAST", true, false, "first", "LAST"},
+		{"separated hunks", "first\nleft A\nshared 1\nshared 2\nleft B\nLAST", "first\nright A\nshared 1\nshared 2\nright B\nLAST", true, false, "first", "LAST"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			leftPath := filepath.Join(dir, "left.txt")
+			if err := os.WriteFile(leftPath, []byte(tc.left), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{leftPath}
+			if tc.rightFile {
+				rightPath := filepath.Join(dir, "right.txt")
+				if err := os.WriteFile(rightPath, []byte(tc.right), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				paths = append(paths, rightPath)
+			}
+			sim := tcell.NewSimulationScreen("")
+			if err := sim.Init(); err != nil {
+				t.Fatal(err)
+			}
+			sim.SetSize(72, 7)
+			app, err := NewWithFiles(sim, t.TempDir(), nil, paths...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer app.Close()
+			if app.isDiffStale() || app.layoutVersions != app.versions {
+				t.Fatalf("initial diff is stale: layout=%+v buffers=%+v", app.layoutVersions, app.versions)
+			}
+			for side, count := range map[viewport.Side]int{viewport.Left: app.left.buf.LinesNum(), viewport.Right: app.right.buf.LinesNum()} {
+				for line := range count {
+					if app.layout.RowFor(side, line) < 0 {
+						t.Fatalf("pane %d line %d has no initial row", side, line)
+					}
+				}
+			}
+			if tc.wantSpacer {
+				if len(app.pairs) < 2 || app.pairs[1].Kind != compare.Spacer || app.pairs[1].Left != -1 || app.pairs[1].Right != 1 {
+					t.Fatalf("inserted file line has no aligned spacer: %+v", app.pairs)
+				}
+			}
+			if tc.name == "unicode change" || tc.name == "separated hunks" {
+				withColorscheme(t, map[string]tcell.Style{
+					"diff-added":   tcell.StyleDefault.Foreground(tcell.ColorGreen),
+					"diff-deleted": tcell.StyleDefault.Foreground(tcell.ColorRed),
+				})
+			}
+			app.draw()
+			if got := screenLine(sim, 0, 72); !strings.Contains(got, tc.first) {
+				t.Fatalf("first draw missing %q: %q", tc.first, got)
+			}
+			if tc.wantSpacer {
+				if got := screenLine(sim, 1, 72); !strings.Contains(got, "RIGHT_INSERT") {
+					t.Fatalf("first draw missing aligned inserted line: %q", got)
+				}
+			}
+			switch tc.name {
+			case "reordered blocks":
+				if pair := app.pairs[1]; pair.Kind != compare.Spacer || pair.Left != -1 || pair.Right != 1 {
+					t.Fatalf("moved block did not start with right-only row: %+v", pair)
+				}
+				if got := screenLine(sim, 1, 72); strings.TrimSpace(string([]rune(got)[:app.left.width])) != "" || !strings.Contains(string([]rune(got)[app.right.x:]), "green") {
+					t.Fatalf("moved block first row is not aligned with a left spacer: %q", got)
+				}
+			case "unicode change", "separated hunks":
+				pair := app.pairs[1]
+				if pair.Kind != compare.Changed || pair.Left != 1 || pair.Right != 1 || len(pair.Changes) == 0 {
+					t.Fatalf("first changed line lacks paired spans: %+v", pair)
+				}
+				col := 0
+				if tc.name == "unicode change" {
+					col = 3
+					if pair.Changes[0].Left != (compare.RuneSpan{Start: 3, End: 4}) || pair.Changes[0].Right != (compare.RuneSpan{Start: 3, End: 4}) {
+						t.Fatalf("accent replacement spans are wrong: %+v", pair.Changes)
+					}
+				}
+				assertStartupChangedGlyph(t, app, 1, col)
+			}
+			app.top = len(app.layout.Rows) - app.rows
+			app.clampTop()
+			app.draw()
+			visible := ""
+			for row := range app.rows {
+				visible += screenLine(sim, row, 72)
+			}
+			if !strings.Contains(visible, tc.last) {
+				t.Fatalf("last file line cannot be reached by scrolling: %q", visible)
+			}
+			switch tc.name {
+			case "reordered blocks":
+				row := app.layout.RowFor(viewport.Left, 3)
+				if pair := app.pairs[4]; pair.Kind != compare.Spacer || pair.Left != 3 || pair.Right != -1 {
+					t.Fatalf("moved block did not end with left-only row: %+v", pair)
+				}
+				if got := screenLine(sim, row-app.top, 72); !strings.Contains(string([]rune(got)[:app.left.width]), "green") || strings.TrimSpace(string([]rune(got)[app.right.x:])) != "" {
+					t.Fatalf("moved block last row is not aligned with a right spacer: %q", got)
+				}
+			case "separated hunks":
+				pair := app.pairs[4]
+				if pair.Kind != compare.Changed || pair.Left != 4 || pair.Right != 4 || len(pair.Changes) == 0 {
+					t.Fatalf("second separated hunk lacks paired spans: %+v", pair)
+				}
+				row := app.layout.RowFor(viewport.Left, 4) - app.top
+				if got := screenLine(sim, row, 72); !strings.Contains(string([]rune(got)[:app.left.width]), "left B") || !strings.Contains(string([]rune(got)[app.right.x:]), "right B") {
+					t.Fatalf("second changed row lost alignment after scrolling: %q", got)
+				}
+				assertStartupChangedGlyph(t, app, row, 0)
+			}
+			fragments := map[string][]string{
+				"repeated blocks":  {"repeat", "a", "b"},
+				"reordered blocks": {"red", "blue", "green"},
+				"unicode change":   {"café", "cafe", "東", "京", "都"},
+				"separated hunks":  {"left A", "right A", "left B", "right B"},
+			}[tc.name]
+			if len(fragments) > 0 {
+				rendered := ""
+				for top := 0; top < len(app.layout.Rows); top++ {
+					app.top = top
+					app.clampTop()
+					app.draw()
+					for row := range app.rows {
+						rendered += screenLine(sim, row, 72)
+					}
+				}
+				for _, fragment := range fragments {
+					if !strings.Contains(rendered, fragment) {
+						t.Fatalf("rendered and scrolled file pair missing %q", fragment)
+					}
+				}
+			}
+		})
+	}
+}
+
+func assertStartupChangedGlyph(t *testing.T, app *App, row, column int) {
+	t.Helper()
+	for _, tc := range []struct {
+		p    *pane
+		want tcell.Color
+	}{{&app.left, tcell.ColorRed}, {&app.right, tcell.ColorGreen}} {
+		fg, _, _ := cellStyle(app.surface, tc.p.view.BufView().X+column, row)
+		if fg != tc.want {
+			t.Fatalf("changed glyph in %s row %d has color %v, want %v", app.paneSideName(tc.p), row, fg, tc.want)
+		}
+	}
+}
 
 func TestStartupFilesUseIndependentBuffersEvenForSamePath(t *testing.T) {
 	configDir := t.TempDir()

@@ -10,8 +10,8 @@ import (
 
 var ConfigDir string
 
-// DisableBufferStateWrites is enabled by mdiff to keep Micro's optional
-// cursor/undo state serialization from writing into the user's config tree.
+// DisableBufferStateWrites can suppress Micro's optional cursor/undo state
+// serialization. mdiff leaves it off and resolves duplicate paths per buffer.
 var DisableBufferStateWrites bool
 
 // Diagnostics contains non-fatal configuration issues collected during

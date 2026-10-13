@@ -258,6 +258,8 @@ var emptyCommand = Command{
 type Buffer struct {
 	*EventHandler
 	*SharedBuffer
+	// DisableStateWrite resolves collisions when two independent panes use one path.
+	DisableStateWrite bool
 
 	cursors     []*Cursor
 	curCursor   int
@@ -571,7 +573,7 @@ func (b *Buffer) Fini() {
 	if b.Type.Kind == BTTransient.Kind {
 		return
 	}
-	if !config.DisableBufferStateWrites && !b.Modified() {
+	if !config.DisableBufferStateWrites && !b.DisableStateWrite && !b.Modified() {
 		b.Serialize()
 	}
 	b.CancelBackup()

@@ -29,6 +29,7 @@ type Command struct {
 }
 
 var commands map[string]Command
+var coreCommands map[string]bool
 
 func InitCommands() {
 	commands = map[string]Command{
@@ -68,6 +69,22 @@ func InitCommands() {
 		"raw":         {(*BufPane).RawCmd, nil},
 		"textfilter":  {(*BufPane).TextFilterCmd, nil},
 	}
+	coreCommands = make(map[string]bool, len(commands))
+	for name := range commands {
+		coreCommands[name] = true
+	}
+}
+
+// IsPluginCommand reports a command registered beyond Micro's built-ins.
+func IsPluginCommand(name string) bool {
+	_, registered := commands[name]
+	return registered && !coreCommands[name]
+}
+
+// IsRegisteredCommand reports whether Micro can dispatch the command.
+func IsRegisteredCommand(name string) bool {
+	_, registered := commands[name]
+	return registered
 }
 
 // MakeCommand is a function to easily create new commands
@@ -85,7 +102,11 @@ func CommandEditAction(prompt string) BufKeyAction {
 	return func(h *BufPane) bool {
 		InfoBar.Prompt("> ", prompt, "Command", nil, func(resp string, canceled bool) {
 			if !canceled {
-				MainTab().CurPane().HandleCommand(resp)
+				if MdiffCommand != nil {
+					MdiffCommand(h, resp)
+				} else {
+					MainTab().CurPane().HandleCommand(resp)
+				}
 			}
 		})
 		return false
@@ -96,7 +117,11 @@ func CommandEditAction(prompt string) BufKeyAction {
 // given command
 func CommandAction(cmd string) BufKeyAction {
 	return func(h *BufPane) bool {
-		MainTab().CurPane().HandleCommand(cmd)
+		if MdiffCommand != nil {
+			MdiffCommand(h, cmd)
+		} else {
+			MainTab().CurPane().HandleCommand(cmd)
+		}
 		return false
 	}
 }

@@ -20,6 +20,7 @@ import (
 func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(),
 		"TERM=xterm-256color",
@@ -47,7 +48,7 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	if transcript.mouseModeRequested() {
 		mouseStart := transcript.mark()
 		writePTY(t, terminal, []byte{0x1b, '[', 'M', 96, 55, 34}) // X11 wheel-up over the right pane.
-		transcript.waitForScreenSince(t, mouseStart, "L19")
+		transcript.waitForScreenSince(t, mouseStart, "L20")
 	} else {
 		t.Log("PTY terminfo did not enable mouse reporting; simulation tests cover wheel routing")
 	}
@@ -80,10 +81,9 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 	if err := pty.Setsize(terminal, &pty.Winsize{Rows: 12, Cols: 60}); err != nil {
 		t.Fatal(err)
 	}
-	resized := transcript.waitForScreenSince(t, resizeStart, "R04")
-	if !hasVisibleCursorWithin(resized[resizeStart:], 12, 60) {
-		t.Fatalf("resize redraw did not place a visible cursor inside the new terminal bounds; cursor sequences=%q output tail=%q", cursorPositionBeforeShow.FindAllSubmatch(resized[resizeStart:], -1), tail(resized[resizeStart:], 500))
-	}
+	// R04 was already visible before the resize. Wait for the menu to move
+	// to its new row and the cursor to return to the resized right pane.
+	transcript.waitForResizeRedraw(t, resizeStart, 10, 1, 8, 31, 60)
 
 	quitStart := transcript.mark()
 	writePTY(t, terminal, []byte{0x11}) // Ctrl-Q prompts for each modified unnamed buffer.
@@ -100,6 +100,7 @@ func TestPTYPasteScrollResizeAndTerminalRestore(t *testing.T) {
 func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
 	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 40})
@@ -145,6 +146,7 @@ func TestCLIRejectsMoreThanTwoPathsBeforeTerminalInitialization(t *testing.T) {
 func TestPTYFileArgumentsOpenSaveAndOpenOnlyFocusedPane(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	filesDir := t.TempDir()
 	leftPath := filepath.Join(filesDir, "left.txt")
 	rightPath := filepath.Join(filesDir, "right.txt")
@@ -196,6 +198,7 @@ func TestPTYFileArgumentsOpenSaveAndOpenOnlyFocusedPane(t *testing.T) {
 func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	leftPath, rightPath := writeWorkflowFiles(t, "left.txt", "LEFT-OLD\n", "right.txt", "RIGHT-OLD\n")
 	cmd := exec.Command(binary, leftPath, rightPath)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
@@ -234,6 +237,7 @@ func TestPTYQuitPromptsForBothNamedPanesAndHonorsChoices(t *testing.T) {
 func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	leftPath := filepath.Join(t.TempDir(), "left.txt")
 	if err := os.WriteFile(leftPath, []byte("LEFT-OLD\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -270,6 +274,7 @@ func TestPTYQuitCancelPreservesDirtyFile(t *testing.T) {
 func TestPTYCtrlQCancelsPromptAndUnnamedQuitCanSave(t *testing.T) {
 	binary := buildPTYBinary(t)
 	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
 	savePath := filepath.Join(t.TempDir(), "unnamed-save.txt")
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir, "MICRO_TRUECOLOR=0")
@@ -404,6 +409,27 @@ func (p *ptyTranscript) waitForCursorInColumnSince(t *testing.T, start, minCol, 
 	}
 }
 
+func (p *ptyTranscript) waitForResizeRedraw(t *testing.T, start, menuRow, minRow, maxRow, minCol, maxCol int) {
+	t.Helper()
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
+	for {
+		p.mu.Lock()
+		data := append([]byte(nil), p.data...)
+		p.mu.Unlock()
+		if start <= len(data) && screenContainsAtRow(data, menuRow, "^Q Quit") && lastCursorPositionWithin(data[start:], minRow, maxRow, minCol, maxCol) && cursorRemainsVisible(data) {
+			return
+		}
+		select {
+		case <-p.changed:
+		case <-p.done:
+			t.Fatalf("PTY closed before resize redrew the menu and placed a visible cursor in rows %d..%d, columns %d..%d", minRow, maxRow, minCol, maxCol)
+		case <-timer.C:
+			t.Fatalf("timed out waiting for resize redraw and cursor in rows %d..%d, columns %d..%d; cursor positions=%q output tail=%q", minRow, maxRow, minCol, maxCol, cursorPosition.FindAllSubmatch(data[start:], -1), tail(data[start:], 500))
+		}
+	}
+}
+
 func (p *ptyTranscript) waitForScreenSince(t *testing.T, start int, marker string) []byte {
 	t.Helper()
 	timer := time.NewTimer(5 * time.Second)
@@ -412,7 +438,7 @@ func (p *ptyTranscript) waitForScreenSince(t *testing.T, start int, marker strin
 		p.mu.Lock()
 		data := append([]byte(nil), p.data...)
 		p.mu.Unlock()
-		if start < len(data) && screenContainsSince(data, start, marker) {
+		if start < len(data) && screenContains(data, marker) {
 			return data
 		}
 		select {
@@ -432,11 +458,18 @@ func tail(data []byte, length int) []byte {
 	return data
 }
 
-func screenContainsSince(data []byte, start int, marker string) bool {
+func screenContains(data []byte, marker string) bool {
 	screen := newTestTerminal()
-	screen.apply(data[:start])
-	screen.apply(data[start:])
+	// A checkpoint may fall inside an escape sequence. Decode the transcript
+	// as one stream so the screen state is independent of that byte offset.
+	screen.apply(data)
 	return strings.Contains(screen.text(), marker)
+}
+
+func screenContainsAtRow(data []byte, row int, marker string) bool {
+	screen := newTestTerminal()
+	screen.apply(data)
+	return row >= 1 && row <= len(screen.cells) && strings.Contains(string(screen.cells[row-1]), marker)
 }
 
 type testTerminal struct {
@@ -539,17 +572,23 @@ func numberedLines(prefix string, count int) string {
 	return lines
 }
 
+var cursorPosition = regexp.MustCompile(`\x1b\[([0-9]+);([0-9]+)H`)
 var cursorPositionBeforeShow = regexp.MustCompile(`\x1b\[([0-9]+);([0-9]+)H(\x1b\[[0-9;?]*[A-Za-z])*\x1b\[\?25h`)
 
-func hasVisibleCursorWithin(transcript []byte, rows, cols int) bool {
-	for _, match := range cursorPositionBeforeShow.FindAllSubmatch(transcript, -1) {
-		row, _ := strconv.Atoi(string(match[1]))
-		col, _ := strconv.Atoi(string(match[2]))
-		if row >= 1 && row <= rows && col >= 1 && col <= cols {
-			return true
-		}
+func lastCursorPositionWithin(transcript []byte, minRow, maxRow, minCol, maxCol int) bool {
+	matches := cursorPosition.FindAllSubmatch(transcript, -1)
+	if len(matches) == 0 {
+		return false
 	}
-	return false
+	last := matches[len(matches)-1]
+	row, _ := strconv.Atoi(string(last[1]))
+	col, _ := strconv.Atoi(string(last[2]))
+	return row >= minRow && row <= maxRow && col >= minCol && col <= maxCol
+}
+
+func cursorRemainsVisible(transcript []byte) bool {
+	show, hide := bytes.LastIndex(transcript, []byte("\x1b[?25h")), bytes.LastIndex(transcript, []byte("\x1b[?25l"))
+	return show >= 0 && show > hide
 }
 
 func hasVisibleCursorInColumnRange(transcript []byte, minCol, maxCol int) bool {
@@ -576,12 +615,27 @@ func assertNoUnexpectedPersistedState(t *testing.T, configDir string) {
 			}
 			continue
 		}
+		if entry.Name() == "settings.json" && !entry.IsDir() {
+			continue
+		}
 		if (entry.Name() != "buffers" && entry.Name() != "backups") || !entry.IsDir() {
 			t.Fatalf("editor wrote unexpected configuration or buffer state: %v", entries)
 		}
 		children, err := os.ReadDir(filepath.Join(configDir, entry.Name()))
-		if err != nil || len(children) != 0 {
+		if err != nil || (len(children) > 1 || (len(children) == 1 && children[0].Name() != "history")) {
 			t.Fatalf("editor wrote unexpected files under %s: entries=%v err=%v", entry.Name(), children, err)
+		}
+	}
+}
+
+func preparePTYConfig(t *testing.T, configDir string) {
+	t.Helper()
+	for name, contents := range map[string]string{
+		"settings.json": `{"keymenu":true}`,
+		"bindings.json": `{"buffer":{"CtrlUp":"ScrollUp","CtrlDown":"ScrollDown"}}`,
+	} {
+		if err := os.WriteFile(filepath.Join(configDir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
