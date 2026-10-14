@@ -126,15 +126,17 @@ Contributor responsibilities and the independent review workflow are described
 in [docs/roles.md](docs/roles.md) and
 [`design_docs/agent_workflow.md`](design_docs/agent_workflow.md).
 
-The technical design, prototype findings, and implementation milestones are in
-[design_docs/micro_diff_editor.md](design_docs/micro_diff_editor.md),
-[design_docs/micro_integration_prototype.md](design_docs/micro_integration_prototype.md),
-and [design_docs/implementation_plan.md](design_docs/implementation_plan.md).
+The technical design and open follow-up work are in
+[design_docs/micro_diff_editor.md](design_docs/micro_diff_editor.md) and
+[design_docs/future_work.html](design_docs/future_work.html). The
+[implementation plan](design_docs/implementation_plan.md) indexes active work;
+the [prototype findings](design_docs/micro_integration_prototype.md) record the
+Micro source integration decision.
 
 ## License and vendored source
 
 mdiff uses the same MIT license as Micro; see [`LICENSE`](LICENSE). The Micro
-v2.0.15 source pin, local patch inventory, upstream refresh procedure, and
+v2.0.15 source pin, original patch inventory, upstream refresh procedure, and
 preserved upstream and third-party notices are documented in
 [`design_docs/micro_integration_prototype.md`](design_docs/micro_integration_prototype.md)
 and `internal/micro/LICENSE*`. `just audit` checks Go dependencies for known
