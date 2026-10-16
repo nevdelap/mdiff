@@ -21,6 +21,7 @@ import (
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	ulua "github.com/nevdelap/mdiff/internal/micro/lua"
 	"github.com/nevdelap/mdiff/internal/micro/screen"
+	"github.com/nevdelap/mdiff/internal/micro/shell"
 	"github.com/nevdelap/mdiff/internal/viewport"
 	lua "github.com/yuin/gopher-lua"
 )
@@ -97,6 +98,8 @@ type App struct {
 	helpTop          int
 	helpQuery        string
 	helpMatch        int
+	handoff          func(func() error) error
+	terminalErr      error
 }
 
 // New initializes Micro's in-memory settings and real buffers/actions. Passing
@@ -188,6 +191,7 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 	action.InitCommands()
 	action.MdiffAction = app.routeMicroAction
 	action.MdiffCommand = app.runMicroCommand
+	shell.InteractiveRunner = app.runInteractiveShell
 	if pluginErr != nil {
 		config.AddDiagnostic(pluginErr.Error())
 	}
@@ -403,25 +407,32 @@ func RunWithFiles(configDir string, debounceMS *int, paths ...string) error {
 	}
 	defer app.Close()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(signals)
 	events := make(chan tcell.Event, 16)
-	terminal := app.terminal
+	session := newTerminalSession(app, events)
+	app.handoff = session.handoff
 	go func() {
 		for {
-			e := terminal.PollEvent()
 			select {
-			case events <- e:
 			case <-ctx.Done():
 				return
-			}
-			if e == nil {
+			case sig := <-signals:
+				if sig == os.Interrupt && session.inCommand.Load() {
+					continue
+				}
+				cancel()
 				return
 			}
 		}
 	}()
 
-	return RunWithSignals(ctx, app, events)
+	err = RunWithSignals(ctx, app, events)
+	session.stopReader()
+	return err
 }
 
 // Close releases both Micro buffers and restores the terminal exactly once.
@@ -439,6 +450,8 @@ func (a *App) Close() {
 	action.Tabs = nil
 	action.MdiffAction = nil
 	action.MdiffCommand = nil
+	shell.InteractiveRunner = nil
+	screen.RestartCallback = nil
 	if a.pluginStop != nil {
 		close(a.pluginStop)
 		a.pluginStop = nil
@@ -559,6 +572,7 @@ func (a *App) resize(cols, rows int) {
 		TabWindow: display.NewTabWindow(cols, 0),
 		List:      []*action.Tab{a.microTab},
 	}
+	screen.RestartCallback = action.Tabs.ResetMouse
 	a.left.h.Resize(a.left.width, a.rows)
 	a.right.h.Resize(a.right.width, a.rows)
 	a.expandWithAnchor(anchor, a.displayedLeft, a.displayedRight)
@@ -1192,6 +1206,9 @@ func RunWithSignals(ctx context.Context, a *App, events <-chan tcell.Event) erro
 		case callback := <-a.pluginTimers:
 			if callback != nil {
 				callback()
+				if a.terminalErr != nil {
+					return a.terminalErr
+				}
 				a.syncChangedBuffers()
 				a.draw()
 			}
@@ -1199,7 +1216,11 @@ func RunWithSignals(ctx context.Context, a *App, events <-chan tcell.Event) erro
 			if !ok {
 				return errors.New("event stream closed")
 			}
-			if a.handle(event) {
+			done := a.handle(event)
+			if a.terminalErr != nil {
+				return a.terminalErr
+			}
+			if done {
 				return nil
 			}
 			a.draw()

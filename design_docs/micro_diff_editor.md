@@ -48,8 +48,13 @@ panes. The default Micro configuration directory is created if missing; an
 explicit `--config-dir` must exist. Shutdown stops comparison work, follows
 Micro's dirty-buffer and save decisions for both panes, and restores the
 terminal. The fixed panes remain synchronized after a Micro command or prompt
-replaces a buffer. Terminal handoff for `ShellMode` and `Suspend` is an
-[open follow-up](future_work.html#terminal-handoff).
+replaces a buffer. For `ShellMode` and `Suspend`, mdiff stops and joins the
+screen reader before Micro releases the terminal. The shell command uses normal
+terminal mode and waits for Enter after showing output; Ctrl+C interrupts the
+child command while mdiff retains signal ownership. Resume creates a new screen
+and reader, installs any completed diff result through the existing version
+check, then redraws the shared two-pane viewport. A restart failure returns an
+error after terminal cleanup instead of using the released screen.
 
 ## Comparison and visual alignment
 

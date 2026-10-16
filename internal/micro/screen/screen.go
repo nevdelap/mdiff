@@ -167,16 +167,21 @@ func TempFini() bool {
 	return screenWasNil
 }
 
-// TempStart restarts the screen after it was temporarily disabled
-func TempStart(screenWasNil bool) {
+// TempStart restarts the screen after it was temporarily disabled.
+// The caller must handle a restart failure rather than reuse the released screen.
+func TempStart(screenWasNil bool) error {
 	if !screenWasNil {
-		Init()
+		err := Init()
 		Unlock()
+		if err != nil {
+			return err
+		}
 
 		if RestartCallback != nil {
 			RestartCallback()
 		}
 	}
+	return nil
 }
 
 // Init creates and initializes the tcell screen
@@ -196,10 +201,17 @@ func Init() error {
 	var oldTerm string
 	modifiedTerm := false
 	setXterm := func() {
-		oldTerm = os.Getenv("TERM")
+		if !modifiedTerm {
+			oldTerm = os.Getenv("TERM")
+		}
 		os.Setenv("TERM", "xterm-256color")
 		modifiedTerm = true
 	}
+	defer func() {
+		if modifiedTerm {
+			os.Setenv("TERM", oldTerm)
+		}
+	}()
 
 	if config.GetGlobalOption("xterm").(bool) {
 		setXterm()
@@ -218,15 +230,14 @@ func Init() error {
 		}
 	}
 	if err = Screen.Init(); err != nil {
+		// tcell has not completed initialization, so Fini may dereference
+		// uninitialized terminal I/O and panic. Its Init failure paths close
+		// any terminal handles they opened.
+		Screen = nil
 		return err
 	}
 
 	Screen.SetPaste(config.GetGlobalOption("paste").(bool))
-
-	// restore TERM
-	if modifiedTerm {
-		os.Setenv("TERM", oldTerm)
-	}
 
 	if config.GetGlobalOption("mouse").(bool) {
 		Screen.EnableMouse()

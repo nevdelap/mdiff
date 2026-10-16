@@ -1,10 +1,12 @@
 package prototype
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/config"
+	"github.com/nevdelap/mdiff/internal/micro/shell"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
@@ -22,6 +24,14 @@ func (a *App) routeMicroAction(name string, h *action.BufPane) bool {
 		h.OpenFile()
 	case "AddTab":
 		a.newFocusedDocument()
+	case "Suspend":
+		if a.handoff == nil {
+			action.InfoBar.Error("Suspend requires a terminal session")
+			break
+		}
+		if err := a.handoff(suspendProcess); err != nil {
+			a.terminalErr = err
+		}
 	case "NextSplit", "PreviousSplit":
 		a.focus = 1 - a.focus
 		a.setFocus()
@@ -95,6 +105,32 @@ func (a *App) routeMicroAction(name string, h *action.BufPane) bool {
 		return false
 	}
 	return true
+}
+
+func (a *App) runInteractiveShell(input string, wait, getOutput bool) (string, error) {
+	command, err := shell.PrepareInteractiveCommand(input, wait, getOutput)
+	if err != nil {
+		action.InfoBar.Error(err.Error())
+		return "", err
+	}
+	if a.handoff == nil {
+		err := fmt.Errorf("ShellMode requires a terminal session")
+		action.InfoBar.Error(err.Error())
+		return "", err
+	}
+	var output string
+	var commandErr error
+	if err := a.handoff(func() error {
+		output, commandErr = command.RunWithReleasedTerminal()
+		return nil
+	}); err != nil {
+		a.terminalErr = err
+		return output, err
+	}
+	if commandErr != nil {
+		action.InfoBar.Error(commandErr.Error())
+	}
+	return output, commandErr
 }
 
 func microIntSetting(h *action.BufPane, name string) int {

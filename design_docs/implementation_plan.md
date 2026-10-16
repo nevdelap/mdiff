@@ -19,7 +19,7 @@ product direction and durable architecture are in
 
 ### TASK-012 - Restore interactive shell and suspend actions
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -97,6 +97,35 @@ Verification:
 - `just build`
 - Run and record a manual shell and suspend/resume check on an available real
   terminal; record any supported platform that could not be checked locally.
+
+Handoff:
+
+- Restored the default and configured Micro shell action and configured suspend
+  action. `internal/prototype` owns the signal listener, screen reader, terminal
+  release/restart, and pending diff installation. The Micro screen API now
+  returns restart errors; the shell API can run an interactive command under
+  mdiff's terminal owner and hold its output until Enter.
+- Added PTY coverage for two shell handoffs, output acknowledgement, command
+  failure, Ctrl+C interruption, suspend/resume followed by input, and normal
+  terminal restoration. In-process tests cover a completed diff during handoff
+  and a forced screen restart failure without a stale reader or screen.
+- Addressed the implementation review findings: failed tcell initialization now
+  clears the partial screen without finalizing it; both shell routes use one
+  Micro-owned command executor; and the tests distinguish command output from
+  echoed input, verify two-pane state and alignment after resume, discard a
+  stale diff result, and check terminal modes after a real restart failure. The
+  follow-up review found an unnecessary handoff for invalid shell input; Micro
+  now validates it before terminal release, with app-route tests for an empty
+  command and malformed quoting.
+- Verification passed: `just format`, `just lint`, `just test`, `just test-pty`,
+  `just build`, and `just test-race`. A manual Linux terminal session ran
+  `Ctrl+B`, displayed command output until Enter, resumed the editor, suspended
+  through a configured `Ctrl+R` binding, resumed with `SIGCONT`, accepted an
+  edit, and exited through the dirty-buffer prompt. macOS terminal behavior
+  could not be checked locally and remains for CI or independent review.
+- The single task change increments the patch version once and updates the
+  release notes. Independent review pass 3 found no open findings and approved
+  the implementation for completion.
 
 ### TASK-013 - Complete the blocked-command audit
 

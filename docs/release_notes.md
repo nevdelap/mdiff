@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### v0.0.3
+
+- Restore Micro's interactive shell prompt and configured suspend action with
+  coordinated terminal handoff, output pause, and two-pane redraw on return.
+
 ### v0.0.2
 
 - Build the initial diff from file contents before the first draw so multiline

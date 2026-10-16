@@ -14,6 +14,10 @@ import (
 	"github.com/nevdelap/mdiff/internal/micro/util"
 )
 
+// InteractiveRunner lets an embedding application own terminal and signal
+// handoff while retaining Micro's interactive shell entry point.
+var InteractiveRunner func(string, bool, bool) (string, error)
+
 // ExecCommand executes a command using exec
 // It returns any output/errors
 func ExecCommand(name string, arg ...string) (string, error) {
@@ -70,57 +74,111 @@ func RunBackgroundShell(input string) (func() string, error) {
 
 // RunInteractiveShell runs a shellcommand interactively
 func RunInteractiveShell(input string, wait bool, getOutput bool) (string, error) {
-	args, err := shellquote.Split(input)
+	if InteractiveRunner != nil {
+		return InteractiveRunner(input, wait, getOutput)
+	}
+	command, err := PrepareInteractiveCommand(input, wait, getOutput)
 	if err != nil {
 		return "", err
 	}
-	if len(args) == 0 {
-		return "", errors.New("No arguments")
+	var screenWasNil bool
+	c := make(chan os.Signal, 1)
+	return command.execute(interactiveHooks{
+		before: func() {
+			screenWasNil = screen.TempFini()
+			// Keep Micro's standalone Ctrl+C handling through the Enter prompt.
+			signal.Reset(os.Interrupt)
+			signal.Notify(c, os.Interrupt)
+		},
+		run:     runCommand,
+		message: screen.TermMessage,
+		after: func() {
+			_ = screen.TempStart(screenWasNil)
+			signal.Notify(util.Sigterm, os.Interrupt)
+			signal.Stop(c)
+		},
+	})
+}
+
+// InteractiveCommand is a validated Micro shell command ready for execution.
+// Preparing it before terminal handoff leaves invalid input in the editor.
+type InteractiveCommand struct {
+	args            []string
+	wait, getOutput bool
+}
+
+// PrepareInteractiveCommand parses the command once for both Micro's standalone
+// route and applications that own terminal handoff.
+func PrepareInteractiveCommand(input string, wait, getOutput bool) (*InteractiveCommand, error) {
+	args, err := shellquote.Split(input)
+	if err != nil {
+		return nil, err
 	}
-	inputCmd := args[0]
+	if len(args) == 0 {
+		return nil, errors.New("No arguments")
+	}
+	return &InteractiveCommand{args: args, wait: wait, getOutput: getOutput}, nil
+}
 
-	// Shut down the screen because we're going to interact directly with the shell
-	screenb := screen.TempFini()
+// RunWithReleasedTerminal executes a prepared command while the embedding
+// application owns the released terminal and process signals.
+func (command *InteractiveCommand) RunWithReleasedTerminal() (string, error) {
+	// mdiff has released its screen, so use Micro's terminal prompt for the
+	// command and restore the application's status handler before returning.
+	messageHandler := screen.MessageHandler
+	screen.SetMessageHandler(nil)
+	defer screen.SetMessageHandler(messageHandler)
+	return command.execute(interactiveHooks{
+		run:     runCommand,
+		message: screen.TermMessage,
+	})
+}
 
-	args = args[1:]
+type interactiveHooks struct {
+	before  func()
+	run     func(*exec.Cmd) (bool, error)
+	message func(...any)
+	after   func()
+}
+
+func (command *InteractiveCommand) execute(hooks interactiveHooks) (string, error) {
+	if hooks.before != nil {
+		hooks.before()
+	}
 
 	// Set up everything for the command
 	outputBytes := &bytes.Buffer{}
-	cmd := exec.Command(inputCmd, args...)
+	cmd := exec.Command(command.args[0], command.args[1:]...)
 	cmd.Stdin = os.Stdin
-	if getOutput {
+	if command.getOutput {
 		cmd.Stdout = io.MultiWriter(os.Stdout, outputBytes)
 	} else {
 		cmd.Stdout = os.Stdout
 	}
 	cmd.Stderr = os.Stderr
 
-	// This is a trap for Ctrl-C so that it doesn't kill micro
-	// micro is killed if the signal is ignored only on Windows, so it is
-	// received
-	c := make(chan os.Signal, 1)
-	signal.Reset(os.Interrupt)
-	signal.Notify(c, os.Interrupt)
-	err = cmd.Start()
-	if err == nil {
-		err = cmd.Wait()
-		if wait {
-			// This is just so we don't return right away and let the user press enter to return
-			screen.TermMessage("")
+	started, err := hooks.run(cmd)
+	if started {
+		if command.wait {
+			hooks.message("")
 		}
 	} else {
-		screen.TermMessage(err)
+		hooks.message(err)
 	}
 
 	output := outputBytes.String()
-
-	// Start the screen back up
-	screen.TempStart(screenb)
-
-	signal.Notify(util.Sigterm, os.Interrupt)
-	signal.Stop(c)
+	if hooks.after != nil {
+		hooks.after()
+	}
 
 	return output, err
+}
+
+func runCommand(cmd *exec.Cmd) (bool, error) {
+	if err := cmd.Start(); err != nil {
+		return false, err
+	}
+	return true, cmd.Wait()
 }
 
 // UserCommand runs the shell command

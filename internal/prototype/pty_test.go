@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -120,6 +121,186 @@ func TestPTYInterruptRestoresTerminalWithoutBufferState(t *testing.T) {
 	}
 	transcript.waitFor(t, []byte("\x1b[?1049l"))
 	assertNoUnexpectedPersistedState(t, configDir)
+}
+
+func TestPTYShellHandoffOutputAndRepeatedReturn(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
+	cmd := exec.Command(binary)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 55})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = terminal.Close() }()
+	transcript := capturePTY(t, terminal)
+	transcript.waitFor(t, []byte("^Q Quit"))
+
+	for _, word := range []string{"FIRST-SHELL-OUTPUT", "SECOND-SHELL-OUTPUT"} {
+		marker := "EXECUTED-" + word
+		writePTY(t, terminal, []byte{0x02}) // Default Ctrl+B ShellMode.
+		transcript.waitForScreenSince(t, transcript.mark()-1, "$ ")
+		outputStart := transcript.mark()
+		// The complete marker is absent from the echoed command line.
+		writePTY(t, terminal, []byte("printf 'EXECUTED-%s\\n' "+word+"\r"))
+		transcript.waitForSince(t, outputStart, []byte(marker))
+		paused := transcript.waitForSince(t, outputStart, []byte("Press enter to continue"))
+		if !bytes.Contains(paused[outputStart:], []byte(marker)) {
+			t.Fatalf("command output %q was not visible before Enter", marker)
+		}
+		if bytes.Contains(paused[outputStart:], []byte("\x1b[?1049h")) {
+			t.Fatal("editor redrew before shell output was acknowledged")
+		}
+		returnStart := transcript.mark()
+		writePTY(t, terminal, []byte{'\r'})
+		transcript.waitForSince(t, returnStart, []byte("^Q Quit"))
+	}
+
+	writePTY(t, terminal, []byte("EDIT-AFTER-SHELL"))
+	transcript.waitForScreenSince(t, transcript.mark()-1, "EDIT-AFTER-SHELL")
+	quitStart := transcript.mark()
+	writePTY(t, terminal, []byte{0x11})
+	transcript.waitForScreenSince(t, quitStart, "Save changes to No name (left pane)")
+	writePTY(t, terminal, []byte{'n'})
+	waitProcess(t, cmd)
+	transcript.waitFor(t, []byte("\x1b[?1049l"))
+}
+
+func TestPTYShellFailedCommandReportsErrorAndReturns(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
+	cmd := exec.Command(binary)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 55})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = terminal.Close() }()
+	transcript := capturePTY(t, terminal)
+	transcript.waitFor(t, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte{0x02})
+	transcript.waitForScreenSince(t, transcript.mark()-1, "$ ")
+	start := transcript.mark()
+	writePTY(t, terminal, []byte("false\r"))
+	transcript.waitForSince(t, start, []byte("Press enter to continue"))
+	returnStart := transcript.mark()
+	writePTY(t, terminal, []byte{'\r'})
+	transcript.waitForSince(t, returnStart, []byte("exit status 1"))
+	transcript.waitForSince(t, returnStart, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte{0x11})
+	waitProcess(t, cmd)
+}
+
+func TestPTYShellInterruptedCommandReturnsToEditor(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
+	cmd := exec.Command(binary)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 55})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = terminal.Close() }()
+	transcript := capturePTY(t, terminal)
+	transcript.waitFor(t, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte{0x02})
+	transcript.waitForScreenSince(t, transcript.mark()-1, "$ ")
+	start := transcript.mark()
+	writePTY(t, terminal, []byte("sh -c 'echo CHILD-READY; exec sleep 30'\r"))
+	transcript.waitForSince(t, start, []byte("CHILD-READY"))
+	writePTY(t, terminal, []byte{0x03}) // Ctrl+C interrupts the child process group.
+	transcript.waitForSince(t, start, []byte("Press enter to continue"))
+	returnStart := transcript.mark()
+	writePTY(t, terminal, []byte{'\r'})
+	transcript.waitForSince(t, returnStart, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte{0x11})
+	waitProcess(t, cmd)
+}
+
+func TestPTYSuspendResumeAcceptsInput(t *testing.T) {
+	binary := buildPTYBinary(t)
+	configDir := t.TempDir()
+	preparePTYConfig(t, configDir)
+	if err := os.WriteFile(filepath.Join(configDir, "bindings.json"), []byte(`{"buffer":{"Ctrl-r":"Suspend"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(binary)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "MICRO_CONFIG_HOME="+configDir)
+	terminal, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 10, Cols: 55})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = terminal.Close() }()
+	transcript := capturePTY(t, terminal)
+	transcript.waitFor(t, []byte("^Q Quit"))
+	writePTY(t, terminal, []byte("\x1b[200~SHARED-LINE\nLEFT-TAIL\x1b[201~"))
+	transcript.waitForScreenSince(t, transcript.mark()-1, "LEFT-TAIL")
+	rightStart := transcript.mark()
+	writePTY(t, terminal, []byte{0x17}) // Ctrl+W focuses right.
+	transcript.waitForCursorInColumnSince(t, rightStart, 28, 55)
+	writePTY(t, terminal, []byte("\x1b[200~RIGHT-INSERT\nSHARED-LINE\nRIGHT-TAIL\x1b[201~"))
+	transcript.waitForScreenSince(t, transcript.mark()-1, "RIGHT-TAIL")
+	start := transcript.mark()
+	writePTY(t, terminal, []byte{0x12}) // Configured Ctrl+R Suspend.
+	transcript.waitForSince(t, start, []byte("\x1b[?1049l"))
+	waitForStoppedProcess(t, cmd)
+	if err := cmd.Process.Signal(syscall.SIGCONT); err != nil {
+		t.Fatal(err)
+	}
+	resumed := transcript.waitForSince(t, start, []byte("^Q Quit"))
+	resumedScreen := newTestTerminal()
+	resumedScreen.apply(resumed)
+	if strings.Count(string(resumedScreen.cells[1]), "SHARED-LINE") != 2 ||
+		!strings.Contains(string(resumedScreen.cells[0]), "RIGHT-INSERT") ||
+		!strings.Contains(resumedScreen.text(), "RIGHT-TAIL") {
+		t.Fatalf("resumed panes lost aligned rows: %q", tail(resumed, 500))
+	}
+	leftStart := transcript.mark()
+	writePTY(t, terminal, []byte{0x17})
+	transcript.waitForCursorInColumnSince(t, leftStart, 1, 27)
+	rightStart = transcript.mark()
+	writePTY(t, terminal, []byte{0x17})
+	transcript.waitForCursorInColumnSince(t, rightStart, 28, 55)
+	inputStart := transcript.mark()
+	writePTY(t, terminal, []byte("EDIT-AFTER-RESUME"))
+	transcript.waitForScreenSince(t, inputStart, "EDIT-AFTER-RESUME")
+	quitStart := transcript.mark()
+	writePTY(t, terminal, []byte{0x11})
+	transcript.waitForScreenSince(t, quitStart, "Save changes to No name (left pane)")
+	writePTY(t, terminal, []byte{'n'})
+	transcript.waitForScreenSince(t, transcript.mark()-1, "Save changes to No name (right pane)")
+	writePTY(t, terminal, []byte{'n'})
+	waitProcess(t, cmd)
+}
+
+func waitForStoppedProcess(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	type stopped struct {
+		status syscall.WaitStatus
+		err    error
+	}
+	done := make(chan stopped, 1)
+	go func() {
+		var status syscall.WaitStatus
+		_, err := syscall.Wait4(cmd.Process.Pid, &status, syscall.WUNTRACED, nil)
+		done <- stopped{status, err}
+	}()
+	select {
+	case result := <-done:
+		// Go's BSD WaitStatus.Stopped excludes SIGSTOP (and classifies that
+		// status as Continued), even when Wait4 returns it for WUNTRACED.
+		stopped := result.status.Stopped() ||
+			(runtime.GOOS == "darwin" && result.status&0xff == 0x7f && syscall.Signal(result.status>>8) == syscall.SIGSTOP)
+		if result.err != nil || !stopped {
+			t.Fatalf("mdiff did not suspend: status=%v err=%v", result.status, result.err)
+		}
+	case <-time.After(5 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("timed out waiting for mdiff to suspend")
+	}
 }
 
 func TestCLIRejectsMoreThanTwoPathsBeforeTerminalInitialization(t *testing.T) {
