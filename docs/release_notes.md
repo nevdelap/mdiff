@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### v0.0.4
+
+- Audit Micro's blocked built-in commands. Pass `eval` through to bundled
+  Micro's unsupported message; keep `tabswitch` and commands that require extra
+  views or an unsafe runtime reload visibly blocked.
+
 ### v0.0.3
 
 - Restore Micro's interactive shell prompt and configured suspend action with

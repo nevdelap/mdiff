@@ -87,6 +87,14 @@ require extra tabs, panes, or a separate viewport are reported in the status
 area. Interactive shell and configured suspend actions return to the two-pane
 view after their terminal handoff.
 
+Bundled Micro reports `Eval unsupported` for `eval`. `vsplit`, `hsplit`, `tab`,
+`tabmove`, `tabswitch`, `term`, `log`, `plugin`, `reload`, and `raw` remain
+unavailable, with a visible status message. There is no second tab to select;
+after a resize, `tabswitch` could also fire a plugin's tab-activation hook
+again. `reload` is blocked because Micro's runtime reload cannot update mdiff's
+active diff debounce and paired viewport safely; restart mdiff to pick up edited
+configuration.
+
 Diff row backgrounds can be overridden in the selected Micro `.micro`
 colorscheme with ordinary `color-link` entries. The built-in dark defaults are:
 

@@ -1,8 +1,8 @@
 # Implementation Plan
 
-TASK-001 through TASK-011 are complete. Their implementation and review history
-is available in the repository history; no completed task specifications remain
-in the active plan.
+TASK-001 through TASK-013 are complete. Earlier implementation and review
+history is available in the repository history. TASK-013's approved handoff
+remains below until its change is merged.
 
 The tasks below are ordered from most to least valuable and must be implemented
 in that order. Complete each task in one Jujutsu change, with exactly one patch
@@ -17,119 +17,9 @@ product direction and durable architecture are in
 
 ## Active tasks
 
-### TASK-012 - Restore interactive shell and suspend actions
-
-State: COMPLETED
-
-Goal:
-
-- Let Micro's `ShellMode` and `Suspend` actions hand terminal control away and
-  return to the same editable, diff-aligned two-pane session.
-
-Dependencies:
-
-- TASK-001 through TASK-011 are `COMPLETED`.
-- Start this task before TASK-013 and TASK-014.
-
-Scope:
-
-- Adapt the action filter and routing in `internal/micro/action` and
-  `internal/prototype`, together with the lifecycle APIs in
-  `internal/micro/screen` and `internal/micro/shell`, so the default `ShellMode`
-  binding and configured `ShellMode` and `Suspend` bindings work on Linux and
-  macOS terminals. Keep the Micro shell prompt and command semantics.
-- Put terminal and process-signal ownership in one mdiff lifecycle controller.
-  Micro's shell path must not independently reset or register `SIGINT` while
-  mdiff's `signal.NotifyContext` is active. During an interactive child command,
-  Ctrl+C must interrupt the child without quitting mdiff; after return, mdiff
-  must resume its normal `SIGINT` and `SIGTERM` shutdown handling.
-- Stop and await the mdiff event reader before releasing its screen, then start
-  a reader attached to the new screen after resume. Make the screen restart API
-  return initialization errors; on failure, restore terminal modes and exit with
-  an error instead of polling or drawing through the old screen. The same
-  lifecycle must support repeated shell handoffs and suspend/resume.
-- During handoff, keep diff workers on immutable snapshots but defer app-side
-  result installation and all drawing. After resume, process pending results
-  through the existing version check and viewport-anchor path, then resize and
-  redraw both panes before accepting new input.
-- Temporarily restore Micro's terminal wait prompt, or show an equivalent
-  explicit Enter-to-return prompt, while shell output is visible. Restore
-  mdiff's status-message handler when the two-pane screen resumes; report a
-  failed command visibly without losing terminal ownership.
-- Keep the two existing buffers, focus, selections, dirty state, and pending
-  diff work intact. Update the README, technical design, and release notes to
-  describe supported behavior and any platform limit.
-
-Out of scope:
-
-- Additional terminal panes, tabs, or a separate shell view.
-- A second executable-level Micro versus mdiff behavior matrix.
-
-Acceptance criteria:
-
-- Default and remapped `ShellMode` bindings open Micro's prompt; a canceled
-  prompt leaves the editor usable. A PTY command prints a unique marker that
-  remains visible until Enter; only then does the two-pane screen redraw and
-  accept edits. A failed command has a separate test for visible error reporting
-  and a usable return path.
-- `Suspend` releases terminal control, and continuing the process restores the
-  two-pane screen and functional editing, pane switching, diff alignment, and
-  quit behavior. No reader polls a released screen, and resumed input comes from
-  the restarted screen.
-- PTY tests cover Ctrl+C interrupting a command without exiting mdiff, two
-  consecutive shell handoffs, suspend/resume followed by an input event, and
-  terminal restoration on exit. A controlled restart-initialization failure test
-  verifies error propagation, terminal-mode restoration, and no use of the stale
-  screen. In-process tests cover routing and state preservation.
-- A diff result completed during handoff is installed or discarded according to
-  its buffer versions before the first resumed draw; no released screen is
-  painted. Tests run on supported platforms or explicitly skip only when an
-  operating-system capability is absent.
-- The patch version is bumped once in this task's single Jujutsu change, and the
-  release note and exact-version assertions agree.
-
-Verification:
-
-- `just format`
-- `just lint`
-- `just test`
-- `just test-pty`
-- `just build`
-- Run and record a manual shell and suspend/resume check on an available real
-  terminal; record any supported platform that could not be checked locally.
-
-Handoff:
-
-- Restored the default and configured Micro shell action and configured suspend
-  action. `internal/prototype` owns the signal listener, screen reader, terminal
-  release/restart, and pending diff installation. The Micro screen API now
-  returns restart errors; the shell API can run an interactive command under
-  mdiff's terminal owner and hold its output until Enter.
-- Added PTY coverage for two shell handoffs, output acknowledgement, command
-  failure, Ctrl+C interruption, suspend/resume followed by input, and normal
-  terminal restoration. In-process tests cover a completed diff during handoff
-  and a forced screen restart failure without a stale reader or screen.
-- Addressed the implementation review findings: failed tcell initialization now
-  clears the partial screen without finalizing it; both shell routes use one
-  Micro-owned command executor; and the tests distinguish command output from
-  echoed input, verify two-pane state and alignment after resume, discard a
-  stale diff result, and check terminal modes after a real restart failure. The
-  follow-up review found an unnecessary handoff for invalid shell input; Micro
-  now validates it before terminal release, with app-route tests for an empty
-  command and malformed quoting.
-- Verification passed: `just format`, `just lint`, `just test`, `just test-pty`,
-  `just build`, and `just test-race`. A manual Linux terminal session ran
-  `Ctrl+B`, displayed command output until Enter, resumed the editor, suspended
-  through a configured `Ctrl+R` binding, resumed with `SIGCONT`, accepted an
-  edit, and exited through the dirty-buffer prompt. macOS terminal behavior
-  could not be checked locally and remains for CI or independent review.
-- The single task change increments the patch version once and updates the
-  release notes. Independent review pass 3 found no open findings and approved
-  the implementation for completion.
-
 ### TASK-013 - Complete the blocked-command audit
 
-State: NEW
+State: COMPLETED
 
 Goal:
 
@@ -200,6 +90,32 @@ Verification:
 - `just test`
 - `just build`
 - `just test-pty` if terminal-facing command behavior changes.
+
+Handoff:
+
+- Audited all eleven formerly denied registered built-ins against the pinned
+  Micro handlers. `eval` reaches Micro's `Eval unsupported` message. The other
+  ten commands remain visibly denied because they create or move views, replace
+  a pane, require a coordinated runtime reload, or can repeat a plugin
+  activation callback after resize. The technical design records each source
+  path and invariant.
+- Kept `reload` blocked: Micro reapplies settings, bindings, plugins,
+  colorscheme, and buffer settings without rebuilding mdiff's aligned viewport;
+  `mdiff.diff-debounce-ms` is resolved at startup and the running coordinator
+  retains that delay and its pending timer. README command guidance and focused
+  routing tests cover the decision and unchanged pane state.
+- Updated the patch version and release notes once in this JJ change. Removed
+  TASK-012's approved specification and review from active documents; both
+  remain in repository history.
+- Verification passed: `just format`, `just lint`, `just test`, `just build`,
+  and `just test-pty` on Linux. macOS behavior remains for CI or independent
+  review.
+- Addressed review pass 1 by restoring the `tabswitch` guard. A resize replaces
+  mdiff's Micro tab without marking that tab active, so Micro's `tabswitch 1`
+  could repeat a plugin `onSetActive` callback. The command documentation and
+  routing regression now cover the guarded behavior after resize; `eval` remains
+  routed to Micro.
+- Independent review pass 2 found no open findings and approved completion.
 
 ### TASK-014 - Share Micro's soft-wrap source-position mapping
 
