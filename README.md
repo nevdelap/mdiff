@@ -6,6 +6,10 @@ identity. A shared diff-aware visual viewport aligns inserted and deleted lines,
 character-level changes, and wrapped rows without adding spacer text to either
 buffer.
 
+I built this to solve one narrow, specific problem for me. I do not expect
+others to need it, so I do not publish releases or downloadable artifacts. I
+build the binary locally and copy it to `~/.bin`.
+
 ## Run
 
 Requirements: Go 1.26 or newer and [just](https://just.systems/) for the
@@ -48,6 +52,12 @@ binding. For a named-path save, open the command bar with `Ctrl+E` and enter
 `save <path>`, or bind Micro's `SaveAs` action to a key. Explicit saves write
 the selected document.
 
+`Ctrl+B` opens Micro's interactive shell prompt. Command output remains in the
+terminal until Enter returns to the two-pane editor. Ctrl+C interrupts a running
+command without quitting mdiff. On Linux and macOS, a configured `Suspend`
+binding releases the terminal; continue the process to resume the same two-pane
+session. Micro does not bind `Suspend` by default.
+
 Run `mdiff --help` for flags and `mdiff --version` for the build version.
 Invalid flags, more than two paths, and an invalid debounce value are rejected
 before raw terminal mode is entered.
@@ -74,8 +84,8 @@ reach the focused pane, including user remaps. Bind `DiffPrevious` and
 `Alt-]`. `ScrollUp`, `ScrollDown`, and related viewport actions move mdiff's
 shared viewport. Plugin-defined commands run in the focused pane. Actions that
 require extra tabs, panes, or a separate viewport are reported in the status
-area. Interactive shell mode remains unavailable because its terminal handoff
-has not been integrated with mdiff's event loop.
+area. Interactive shell and configured suspend actions return to the two-pane
+view after their terminal handoff.
 
 Diff row backgrounds can be overridden in the selected Micro `.micro`
 colorscheme with ordinary `color-link` entries. The built-in dark defaults are:

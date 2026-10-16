@@ -240,8 +240,7 @@ func RejectedBufferSequenceState(sequence string) (action string, exact, prefix 
 }
 
 func prototypeUnsafeAction(name string) bool {
-	return name == "Suspend" || name == "ShellMode" ||
-		name == "Unsplit" ||
+	return name == "Unsplit" ||
 		name == "PreviousTab" || name == "NextTab" || name == "FirstTab" || name == "LastTab" ||
 		(name != "AddTab" && strings.HasPrefix(name, "AddTab")) ||
 		strings.HasPrefix(name, "VSplit") || strings.HasPrefix(name, "HSplit")

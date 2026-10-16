@@ -208,7 +208,7 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 			t.Errorf("menu row %q does not contain %q", row2, label)
 		}
 	}
-	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.2") {
+	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.3") {
 		t.Fatalf("right-aligned menu indicators missing: row1=%q row2=%q", row1, row2)
 	}
 	app.handle(key(tcell.KeyCtrlW, 0, tcell.ModCtrl))
@@ -266,25 +266,18 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 		t.Fatalf("Ctrl+O did not prompt for a path: %q", app.currentStatus())
 	}
 	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
-	for _, rejected := range []struct {
-		key  tcell.Key
-		mods tcell.ModMask
-		want string
-	}{
-		{tcell.KeyCtrlB, tcell.ModCtrl, "ShellMode is unavailable"},
-	} {
-		app.handle(key(rejected.key, 0, rejected.mods))
-		if !strings.Contains(app.currentStatus(), rejected.want) {
-			t.Errorf("rejected key %v did not report %q: %q", rejected.key, rejected.want, app.currentStatus())
-		}
+	app.handle(key(tcell.KeyCtrlB, 0, tcell.ModCtrl))
+	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "$ ") {
+		t.Fatalf("Ctrl+B did not open Micro's shell prompt: %q", app.currentStatus())
 	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	app.handle(key(tcell.KeyF2, 0, tcell.ModNone))
 	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "Filename:") {
 		t.Fatalf("F2 did not route Micro save: %q", app.currentStatus())
 	}
 	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	if got := string(app.left.buf.Bytes()); got != before {
-		t.Fatalf("rejected file/shell action changed buffer: %q", got)
+		t.Fatalf("canceled file/shell action changed buffer: %q", got)
 	}
 	oldRight := app.right.buf
 	app.handle(key(tcell.KeyCtrlT, 0, tcell.ModCtrl))
@@ -406,9 +399,10 @@ func TestReservedKeysHonorCompatibleRemaps(t *testing.T) {
 	}
 	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 	app.handle(key(tcell.KeyCtrlE, 0, tcell.ModCtrl))
-	if !strings.Contains(app.currentStatus(), "ShellMode is unavailable") {
-		t.Fatalf("unsupported shell mode was not explained: %q", app.currentStatus())
+	if !action.InfoBar.HasPrompt || !strings.Contains(app.currentStatus(), "$ ") {
+		t.Fatalf("remapped ShellMode did not open Micro's prompt: %q", app.currentStatus())
 	}
+	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
 }
 
 func TestDefaultCtrlQStillQuits(t *testing.T) {
