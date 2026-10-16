@@ -68,78 +68,10 @@ type SoftWrap interface {
 }
 
 func (w *BufWindow) getVLocFromLoc(loc buffer.Loc) VLoc {
-	vloc := VLoc{SLoc: SLoc{loc.Y, 0}, VisualX: 0}
-
 	if loc.X <= 0 {
-		return vloc
+		return VLoc{SLoc: SLoc{Line: loc.Y}}
 	}
-
-	if w.bufWidth <= 0 {
-		return vloc
-	}
-
-	wordwrap := w.Buf.Settings["wordwrap"].(bool)
-	tabsize := util.IntOpt(w.Buf.Settings["tabsize"])
-
-	line := w.Buf.LineBytes(loc.Y)
-	x := 0
-	totalwidth := 0
-
-	wordwidth := 0
-	wordoffset := 0
-
-	for len(line) > 0 {
-		r, _, size := util.DecodeCharacter(line)
-		line = line[size:]
-
-		width := 0
-		switch r {
-		case '\t':
-			ts := tabsize - (totalwidth % tabsize)
-			width = util.Min(ts, w.bufWidth-vloc.VisualX)
-			totalwidth += ts
-		default:
-			width = runewidth.RuneWidth(r)
-			totalwidth += width
-		}
-
-		wordwidth += width
-
-		// Collect a complete word to know its width.
-		// If wordwrap is off, every single character is a complete "word".
-		if wordwrap {
-			if !util.IsWhitespace(r) && len(line) > 0 && wordwidth < w.bufWidth {
-				if x < loc.X {
-					wordoffset += width
-					x++
-				}
-				continue
-			}
-		}
-
-		// If a word (or just a wide rune) does not fit in the window
-		if vloc.VisualX+wordwidth > w.bufWidth && vloc.VisualX > 0 {
-			vloc.Row++
-			vloc.VisualX = 0
-		}
-
-		if x == loc.X {
-			vloc.VisualX += wordoffset
-			return vloc
-		}
-		x++
-
-		vloc.VisualX += wordwidth
-
-		wordwidth = 0
-		wordoffset = 0
-
-		if vloc.VisualX >= w.bufWidth {
-			vloc.Row++
-			vloc.VisualX = 0
-		}
-	}
-	return vloc
+	return w.scanSourceLine(loc.Y, loc.X, -1, nil)
 }
 
 func (w *BufWindow) getLocFromVLoc(svloc VLoc) buffer.Loc {
@@ -224,8 +156,7 @@ func (w *BufWindow) getLocFromVLoc(svloc VLoc) buffer.Loc {
 }
 
 func (w *BufWindow) getRowCount(line int) int {
-	eol := buffer.Loc{X: util.CharacterCount(w.Buf.LineBytes(line)), Y: line}
-	return w.getVLocFromLoc(eol).Row + 1
+	return w.scanSourceLine(line, -1, -1, nil).Row + 1
 }
 
 func (w *BufWindow) scrollUp(s SLoc, n int) SLoc {
@@ -330,13 +261,7 @@ func (w *BufWindow) VLocFromLoc(loc buffer.Loc) VLoc {
 	if cached, ok := w.vlocCache[key]; ok {
 		return cached
 	}
-	var result VLoc
-	if !softwrap {
-		visualx := util.StringWidth(w.Buf.LineBytes(loc.Y), loc.X, tabSize)
-		result = VLoc{SLoc{loc.Y, 0}, visualx}
-	} else {
-		result = w.getVLocFromLoc(loc)
-	}
+	result := w.getVLocFromLoc(loc)
 	if w.vlocCache == nil {
 		w.vlocCache = make(map[vlocCacheKey]VLoc)
 	} else if len(w.vlocCache) >= 4096 {

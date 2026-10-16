@@ -592,31 +592,107 @@ func TestVisibleWrappedRowRendererMatchesMicroViewportRows(t *testing.T) {
 	}
 }
 
-func TestSourceRuneLocationsMatchMicroAcrossWrappingModes(t *testing.T) {
-	app, sim := newRenderTestApp(t)
-	defer app.Close()
-	sim.SetSize(12, 8)
-	app.resize(12, 8)
-	line := "aa\t猫abcdefgh xyz界"
-	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, line)
-	runes := []rune(line)
-	for _, softwrap := range []bool{false, true} {
-		for _, wordwrap := range []bool{false, true} {
-			if err := app.left.buf.SetOptionNative("softwrap", softwrap); err != nil {
-				t.Fatal(err)
-			}
-			if err := app.left.buf.SetOptionNative("wordwrap", wordwrap); err != nil {
-				t.Fatal(err)
-			}
-			locations := sourceRuneLocations(&app.left, 0, runes)
-			for offset := range locations {
-				want := app.left.view.VLocFromLoc(buffer.Loc{X: offset, Y: 0})
-				if locations[offset] != want {
-					t.Fatalf("softwrap=%t wordwrap=%t offset=%d: got %#v, Micro gives %#v", softwrap, wordwrap, offset, locations[offset], want)
+func TestRuneBoundariesMatchMicroCharacterLocations(t *testing.T) {
+	for _, tc := range []struct {
+		name, line     string
+		width          int
+		wantCharacters []int
+	}{
+		{"tabs wide whitespace", "aa\t猫abcdefgh xyz界", 12, nil},
+		{"multiple combining marks", "e\u0301\u0327猫\tz", 12, []int{0, 1, 1, 1, 2, 3, 4}},
+		{"mark at narrow wrap", "ab e\u0301\u0327猫 xyz", 8, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, sim := newRenderTestApp(t)
+			defer app.Close()
+			sim.SetSize(tc.width, 8)
+			app.resize(tc.width, 8)
+			app.left.buf.Insert(buffer.Loc{}, tc.line)
+			for _, softwrap := range []bool{false, true} {
+				for _, wordwrap := range []bool{false, true} {
+					if err := app.left.buf.SetOptionNative("softwrap", softwrap); err != nil {
+						t.Fatal(err)
+					}
+					if err := app.left.buf.SetOptionNative("wordwrap", wordwrap); err != nil {
+						t.Fatal(err)
+					}
+					mapped := app.left.view.RuneBoundaries(0)
+					if len(mapped.Visual) != len([]rune(tc.line))+1 || len(mapped.Character) != len(mapped.Visual) {
+						t.Fatalf("boundary lengths = %d/%d, want %d", len(mapped.Visual), len(mapped.Character), len([]rune(tc.line))+1)
+					}
+					if tc.wantCharacters != nil && !reflect.DeepEqual(mapped.Character, tc.wantCharacters) {
+						t.Fatalf("rune-to-character boundaries = %v, want %v", mapped.Character, tc.wantCharacters)
+					}
+					for offset, char := range mapped.Character {
+						want := app.left.view.VLocFromLoc(buffer.Loc{X: char, Y: 0})
+						if mapped.Visual[offset] != want {
+							t.Fatalf("softwrap=%t wordwrap=%t rune=%d char=%d: got %#v, Micro gives %#v", softwrap, wordwrap, offset, char, mapped.Visual[offset], want)
+						}
+					}
+					if got, want := app.left.view.LineEndVLoc(0), mapped.Visual[len(mapped.Visual)-1]; got != want {
+						t.Fatalf("line end = %#v, batch gives %#v", got, want)
+					}
 				}
 			}
+		})
+	}
+}
+
+func TestSelectionAfterCombiningClusterUsesCharacterOffset(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "e\u0301\u0327X")
+	app.left.h.Cursor.CurSelection = [2]buffer.Loc{{X: 1}, {X: 2}}
+	mapped := app.left.view.RuneBoundaries(0)
+	if got, want := selectionRuneMask(&app.left, 0, []rune("e\u0301\u0327X"), mapped.Character), []bool{false, false, false, true}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("selection mask = %v, want %v", got, want)
+	}
+}
+
+func TestMarkOnlyChangeHighlightsBaseCell(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "e\u0301Z")
+	app.right.buf.Insert(buffer.Loc{}, "e\u0300Z")
+	app.rebuildWithAnchor(anchor{})
+	withColorscheme(t, map[string]tcell.Style{"diff-deleted": tcell.StyleDefault.Foreground(tcell.ColorRed)})
+	app.draw()
+	textX := app.left.view.BufView().X
+	assertCellStyle(t, app.surface, textX, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+	_, _, attrs := cellStyle(app.surface, textX+1, 0)
+	if attrs&tcell.AttrReverse != 0 {
+		t.Fatal("unchanged cell after combining cluster received change style")
+	}
+}
+
+func TestChangedTextSpanningVisualWrap(t *testing.T) {
+	app, sim := newRenderTestApp(t)
+	defer app.Close()
+	sim.SetSize(30, 8)
+	app.resize(30, 8)
+	for _, p := range []*pane{&app.left, &app.right} {
+		if err := p.buf.SetOptionNative("softwrap", true); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.buf.SetOptionNative("wordwrap", false); err != nil {
+			t.Fatal(err)
 		}
 	}
+	width := app.left.view.BufView().Width
+	left := strings.Repeat("a", width-1) + "bc"
+	right := strings.Repeat("a", width-1) + "XY"
+	app.left.buf.Insert(buffer.Loc{}, left)
+	app.right.buf.Insert(buffer.Loc{}, right)
+	app.rebuildWithAnchor(anchor{})
+	mapped := app.left.view.RuneBoundaries(0)
+	if mapped.Visual[width-1].Row == mapped.Visual[width].Row {
+		t.Fatalf("changed characters do not span wrap: %v", mapped.Visual)
+	}
+	withColorscheme(t, map[string]tcell.Style{"diff-deleted": tcell.StyleDefault.Foreground(tcell.ColorRed)})
+	app.draw()
+	textX := app.left.view.BufView().X
+	assertCellStyle(t, app.surface, textX+mapped.Visual[width-1].VisualX, mapped.Visual[width-1].Row, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+	assertCellStyle(t, app.surface, textX+mapped.Visual[width].VisualX, mapped.Visual[width].Row, tcell.ColorRed, tcell.ColorDarkBlue, 0)
 }
 
 func TestVirtualSpacerRowsRenderNoSourceText(t *testing.T) {
@@ -674,7 +750,7 @@ func TestDiffStylePreservesSyntaxForegroundAndCompositionRules(t *testing.T) {
 	}
 }
 
-func newRenderTestApp(t *testing.T) (*App, tcell.SimulationScreen) {
+func newRenderTestApp(t testing.TB) (*App, tcell.SimulationScreen) {
 	t.Helper()
 	sim := tcell.NewSimulationScreen("")
 	if err := sim.Init(); err != nil {
@@ -687,6 +763,42 @@ func newRenderTestApp(t *testing.T) (*App, tcell.SimulationScreen) {
 	}
 	t.Cleanup(app.Close)
 	return app, sim
+}
+
+func TestUnwrappedHorizontalScrollHighlightsChangedLongLine(t *testing.T) {
+	app, sim := newRenderTestApp(t)
+	defer app.Close()
+	sim.SetSize(40, 8)
+	app.resize(40, 8)
+	index := 5000
+	left := strings.Repeat("a", index) + "X" + strings.Repeat("a", 5000)
+	right := strings.Repeat("a", index) + "Y" + strings.Repeat("a", 5000)
+	app.left.buf.Insert(buffer.Loc{}, left)
+	app.right.buf.Insert(buffer.Loc{}, right)
+	app.rebuildWithAnchor(anchor{})
+	app.left.view.StartCol = index - 3
+	withColorscheme(t, map[string]tcell.Style{"diff-deleted": tcell.StyleDefault.Foreground(tcell.ColorRed)})
+	app.draw()
+	textX := app.left.view.BufView().X
+	assertCellStyle(t, app.surface, textX+3, 0, tcell.ColorRed, tcell.ColorDarkBlue, 0)
+}
+
+func BenchmarkRenderUnwrappedLongLineAnnotations(b *testing.B) {
+	app, _ := newRenderTestApp(b)
+	index := 1 << 19
+	left := strings.Repeat("a", index) + "X" + strings.Repeat("a", index)
+	right := strings.Repeat("a", index) + "Y" + strings.Repeat("a", index)
+	app.left.buf.Insert(buffer.Loc{}, left)
+	app.right.buf.Insert(buffer.Loc{}, right)
+	app.rebuildWithAnchor(anchor{})
+	app.left.view.StartCol = index - 20
+	app.right.view.StartCol = index - 20
+	b.ReportAllocs()
+	b.SetBytes(int64(len(left) + len(right)))
+	b.ResetTimer()
+	for range b.N {
+		app.draw()
+	}
 }
 
 func withColorscheme(t *testing.T, colors map[string]tcell.Style) {

@@ -1,17 +1,15 @@
 package prototype
 
 import (
+	"sort"
 	"unicode"
-	"unicode/utf8"
 
-	runewidth "github.com/mattn/go-runewidth"
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/compare"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	"github.com/nevdelap/mdiff/internal/micro/screen"
-	"github.com/nevdelap/mdiff/internal/micro/util"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
@@ -24,8 +22,9 @@ type renderedCell struct {
 }
 
 type renderedLine struct {
-	changed  []bool
-	selected []bool
+	changed   []bool
+	selected  []bool
+	runeStart int
 }
 
 type renderedRowKey struct{ line, wrapRow int }
@@ -33,6 +32,7 @@ type renderedRowKey struct{ line, wrapRow int }
 func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 	cache := make(map[renderedRowKey][]renderedCell)
 	masks := make(map[int]renderedLine)
+	sourceMaps := make(map[int]display.RuneBoundaryMap)
 	for screenY := 0; screenY < height; screenY++ {
 		rowIndex := top + screenY
 		if rowIndex >= len(layout.Rows) {
@@ -66,24 +66,38 @@ func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 		if !ok {
 			selected := paneHasSelection(p)
 			annotate := len(row.Changes) > 0 || selected
-			cells = a.renderMicroRow(p, cell.Line, cell.WrapRow, annotate)
+			var positions *display.RuneBoundaryMap
+			if annotate {
+				mapped, exists := sourceMaps[cell.Line]
+				if !exists {
+					if p.buf.Settings["softwrap"].(bool) {
+						mapped = p.view.RuneBoundaries(cell.Line)
+					} else {
+						mapped = p.view.VisibleRuneBoundaries(cell.Line, p.view.StartCol, p.view.BufView().Width)
+					}
+					sourceMaps[cell.Line] = mapped
+				}
+				positions = &mapped
+			}
+			cells = a.renderMicroRowMapped(p, cell.Line, cell.WrapRow, positions)
 			cache[key] = cells
 			if _, exists := masks[cell.Line]; !exists {
 				line := renderedLine{}
 				if annotate {
-					runes := []rune(p.buf.Line(cell.Line))
+					runes := sourceMaps[cell.Line].Runes
+					line.runeStart = sourceMaps[cell.Line].RuneOffset
 					if len(row.Changes) > 0 {
-						line.changed = changedRuneMask(runes, row.Changes, p.x != 0)
+						line.changed = changedRuneMaskAt(runes, line.runeStart, row.Changes, p.x != 0)
 					}
 					if selected {
-						line.selected = selectionRuneMask(p, cell.Line, runes)
+						line.selected = selectionRuneMask(p, cell.Line, runes, sourceMaps[cell.Line].Character)
 					}
 				}
 				masks[cell.Line] = line
 			}
 		}
 		lineMasks := masks[cell.Line]
-		copyLine(p, screenY, cells, base, row, p.x != 0, different, lineMasks.changed, lineMasks.selected)
+		copyLine(p, screenY, cells, base, row, p.x != 0, different, lineMasks.runeStart, lineMasks.changed, lineMasks.selected)
 	}
 }
 
@@ -93,13 +107,27 @@ func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 func (a *App) renderMicroLine(p *pane, line int, annotate bool) [][]renderedCell {
 	wraps := a.wrapHeight(p, line)
 	rows := make([][]renderedCell, wraps)
+	var positions *display.RuneBoundaryMap
+	if annotate {
+		mapped := p.view.RuneBoundaries(line)
+		positions = &mapped
+	}
 	for wrapRow := range wraps {
-		rows[wrapRow] = a.renderMicroRow(p, line, wrapRow, annotate)
+		rows[wrapRow] = a.renderMicroRowMapped(p, line, wrapRow, positions)
 	}
 	return rows
 }
 
 func (a *App) renderMicroRow(p *pane, line, wrapRow int, annotate bool) []renderedCell {
+	var positions *display.RuneBoundaryMap
+	if annotate {
+		mapped := p.view.RuneBoundaries(line)
+		positions = &mapped
+	}
+	return a.renderMicroRowMapped(p, line, wrapRow, positions)
+}
+
+func (a *App) renderMicroRowMapped(p *pane, line, wrapRow int, positions *display.RuneBoundaryMap) []renderedCell {
 	view := p.view
 	x, y, width, height := view.X, view.Y, view.Width, view.Height
 	startLine, startCol, active := view.StartLine, view.StartCol, view.IsActive()
@@ -119,8 +147,8 @@ func (a *App) renderMicroRow(p *pane, line, wrapRow int, annotate bool) []render
 		row[col] = renderedCell{rune: r, combc: append([]rune(nil), combc...), style: style, width: cellWidth, sourceRune: -1}
 	}
 	rows := [][]renderedCell{row}
-	if annotate {
-		annotateSourceRunes(p, line, rows, wrapRow)
+	if positions != nil {
+		annotateSourceRunes(p, rows, wrapRow, *positions)
 	}
 	screen.Screen = compositionScreen
 
@@ -193,58 +221,6 @@ func themedRowBackground(group string, fallback tcell.Color) tcell.Style {
 	return config.DefStyle.Background(fallback)
 }
 
-func annotateSourceRunes(p *pane, line int, rows [][]renderedCell, rowOffset int) {
-	if !p.buf.Settings["softwrap"].(bool) {
-		annotateUnwrappedSourceRunes(p, line, rows)
-		return
-	}
-	runes := []rune(p.buf.Line(line))
-	locations := sourceRuneLocations(p, line, runes)
-	for i, r := range runes {
-		runeIndex := i
-		if isCombining(r) {
-			for runeIndex > 0 && isCombining(runes[runeIndex]) {
-				runeIndex--
-			}
-			if runeIndex == i {
-				continue
-			}
-		}
-		start := locations[runeIndex]
-		end := locations[runeIndex+1]
-		markVisualRange(rows, start, end, runeIndex, p, rowOffset)
-	}
-}
-
-func annotateUnwrappedSourceRunes(p *pane, line int, rows [][]renderedCell) {
-	data := p.buf.LineBytes(line)
-	tabSize := util.IntOpt(p.buf.Settings["tabsize"])
-	startCol := p.view.StartCol
-	endCol := startCol + p.view.BufView().Width
-	visualX, runeIndex := 0, 0
-	for len(data) > 0 {
-		r, size := utf8.DecodeRune(data)
-		data = data[size:]
-		if isCombining(r) {
-			runeIndex++
-			continue
-		}
-		width := runewidth.RuneWidth(r)
-		if r == '\t' {
-			width = tabSize - visualX%tabSize
-		}
-		start := visualX
-		visualX += width
-		if visualX > startCol && start < endCol {
-			markVisualRange(rows, display.VLoc{SLoc: display.SLoc{Line: line}, VisualX: start}, display.VLoc{SLoc: display.SLoc{Line: line}, VisualX: visualX}, runeIndex, p, 0)
-		}
-		runeIndex++
-		if visualX >= endCol {
-			break
-		}
-	}
-}
-
 func paneHasSelection(p *pane) bool {
 	for _, cursor := range p.buf.GetCursors() {
 		if cursor.HasSelection() {
@@ -254,74 +230,27 @@ func paneHasSelection(p *pane) bool {
 	return false
 }
 
-// sourceRuneLocations mirrors Micro's width, word-wrap, and soft-wrap
-// calculation in one pass. Calling VLocFromLoc for every rune would rescan the
-// line prefix each time and make long-line rendering quadratic.
-func sourceRuneLocations(p *pane, line int, runes []rune) []display.VLoc {
-	locations := make([]display.VLoc, len(runes)+1)
-	if !p.buf.Settings["softwrap"].(bool) {
-		tabSize := util.IntOpt(p.buf.Settings["tabsize"])
-		visualX := 0
-		for i, r := range runes {
-			locations[i] = display.VLoc{SLoc: display.SLoc{Line: line}, VisualX: visualX}
-			width := runewidth.RuneWidth(r)
-			if r == '\t' {
-				width = tabSize - visualX%tabSize
-			}
-			visualX += width
-		}
-		locations[len(runes)] = display.VLoc{SLoc: display.SLoc{Line: line}, VisualX: visualX}
-		return locations
+// annotateSourceRunes consumes Micro's rune boundaries. The binary search
+// skips characters above this visual row, so a long wrapped line is not
+// rescanned from its beginning for every rendered row.
+func annotateSourceRunes(p *pane, rows [][]renderedCell, rowOffset int, positions display.RuneBoundaryMap) {
+	count := len(positions.Visual) - 1
+	if count <= 0 || positions.RuneOffset < 0 {
+		return
 	}
-
-	bufView := p.view.BufView()
-	bufWidth := bufView.Width
-	if bufWidth <= 0 {
-		return locations
-	}
-	tabSize := util.IntOpt(p.buf.Settings["tabsize"])
-	wordwrap := p.buf.Settings["wordwrap"].(bool)
-	row, visualX, totalWidth := 0, 0, 0
-	widths := make([]int, 0, min(bufWidth, 256))
-	for start := 0; start < len(runes); {
-		wordStart := start
-		widths = widths[:0]
-		wordWidth := 0
-		for start < len(runes) {
-			r := runes[start]
-			width := 0
-			if r == '\t' {
-				tabWidth := tabSize - totalWidth%tabSize
-				width = min(tabWidth, bufWidth-visualX)
-				totalWidth += tabWidth
-			} else {
-				width = runewidth.RuneWidth(r)
-				totalWidth += width
-			}
-			widths = append(widths, width)
-			wordWidth += width
-			start++
-			if wordwrap && !util.IsWhitespace(r) && start < len(runes) && wordWidth < bufWidth {
-				continue
-			}
+	first := sort.Search(count, func(i int) bool {
+		return positions.Visual[i+1].Row >= rowOffset
+	})
+	for i := first; i < count; i++ {
+		start := positions.Visual[i]
+		if start.Row > rowOffset {
 			break
 		}
-
-		if visualX+wordWidth > bufWidth && visualX > 0 {
-			row++
-			visualX = 0
+		if positions.Character[i] == positions.Character[i+1] {
+			continue // combining mark; its base owns the visual cells
 		}
-		for i, width := range widths {
-			locations[wordStart+i] = display.VLoc{SLoc: display.SLoc{Line: line, Row: row}, VisualX: visualX}
-			visualX += width
-		}
-		if visualX >= bufWidth {
-			row++
-			visualX = 0
-		}
+		markVisualRange(rows, start, positions.Visual[i+1], positions.RuneOffset+i, p, rowOffset)
 	}
-	locations[len(runes)] = display.VLoc{SLoc: display.SLoc{Line: line, Row: row}, VisualX: visualX}
-	return locations
 }
 
 func markVisualRange(rows [][]renderedCell, start, end display.VLoc, runeIndex int, p *pane, rowOffset int) {
@@ -352,15 +281,15 @@ func markVisualRange(rows [][]renderedCell, start, end display.VLoc, runeIndex i
 	}
 }
 
-func changedRuneMask(runes []rune, changes []compare.ChangeSpan, right bool) []bool {
+func changedRuneMaskAt(runes []rune, runeStart int, changes []compare.ChangeSpan, right bool) []bool {
 	mask := make([]bool, len(runes))
 	for _, change := range changes {
 		span := change.Left
 		if right {
 			span = change.Right
 		}
-		start := max(0, min(len(mask), span.Start))
-		end := max(start, min(len(mask), span.End))
+		start := max(0, min(len(mask), span.Start-runeStart))
+		end := max(start, min(len(mask), span.End-runeStart))
 		for i := start; i < end; i++ {
 			mask[i] = true
 		}
@@ -368,7 +297,7 @@ func changedRuneMask(runes []rune, changes []compare.ChangeSpan, right bool) []b
 	return expandCombiningMask(runes, mask)
 }
 
-func selectionRuneMask(p *pane, line int, runes []rune) []bool {
+func selectionRuneMask(p *pane, line int, runes []rune, runeToCharacter []int) []bool {
 	mask := make([]bool, len(runes))
 	for _, cursor := range p.buf.GetCursors() {
 		if !cursor.HasSelection() {
@@ -379,7 +308,7 @@ func selectionRuneMask(p *pane, line int, runes []rune) []bool {
 			start, end = end, start
 		}
 		for i := range runes {
-			loc := buffer.Loc{X: i, Y: line}
+			loc := buffer.Loc{X: runeToCharacter[i+1] - 1, Y: line}
 			if loc.GreaterEqual(start) && loc.LessThan(end) {
 				mask[i] = true
 			}
@@ -414,16 +343,17 @@ func clearRow(p *pane, screenY int, style tcell.Style) {
 	}
 }
 
-func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, row viewport.Row, right, different bool, changed, selected []bool) {
+func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, row viewport.Row, right, different bool, runeStart int, changed, selected []bool) {
 	for x, cell := range cells {
 		if cell.width == 0 {
 			continue
 		}
 		style := baseCellStyle(cell.style, rowStyle)
-		if different && cell.sourceRune >= 0 && cell.sourceRune < len(changed) && changed[cell.sourceRune] {
+		localRune := cell.sourceRune - runeStart
+		if different && localRune >= 0 && localRune < len(changed) && changed[localRune] {
 			style = characterDiffStyle(rowStyle, right)
 		}
-		if cell.sourceRune >= 0 && cell.sourceRune < len(selected) && selected[cell.sourceRune] {
+		if localRune >= 0 && localRune < len(selected) && selected[localRune] {
 			style = selectionStyle()
 		}
 		screen.SetContent(p.x+x, screenY, cell.rune, cell.combc, style)

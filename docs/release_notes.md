@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### v0.0.5
+
+- Share Micro's source-position calculation between cursor lookups and diff
+  rendering, including tabs, wrapping, and combining characters. Keep selection
+  and changed-character styling aligned across visual rows.
+
 ### v0.0.4
 
 - Audit Micro's blocked built-in commands. Pass `eval` through to bundled
