@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### v0.0.6
+
+- Restore Micro behavior parity for `QuitAll`, diff-key fallbacks, page actions,
+  command parsing, help buffers, `SaveAll`, wheel bindings, scrollbars, and
+  plugin reload policy.
+- Keep the shared diff gutter as mdiff's replacement for Micro's VCS gutter.
+
 ### v0.0.5
 
 - Share Micro's source-position calculation between cursor lookups and diff

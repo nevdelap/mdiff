@@ -69,6 +69,10 @@ value takes precedence. Large paste events add 20 ms, up to a 200 ms maximum.
 
 ## Micro configuration
 
+mdiff disables Micro's VCS `diffgutter` because its shared diff view provides
+difference indicators for both panes. Other display options, including
+`scrollbar`, remain controlled by the user's Micro configuration.
+
 mdiff reads Micro's config directory in this order: `--config-dir`,
 `MICRO_CONFIG_HOME`, `$XDG_CONFIG_HOME/micro`, then `~/.config/micro`. It reads
 `settings.json`, `bindings.json`, user colorschemes, and syntax definitions and

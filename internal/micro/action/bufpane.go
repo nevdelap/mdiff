@@ -31,8 +31,10 @@ var BufBindings *KeyTree
 var RejectedBufferBindings map[string]string
 
 // MdiffAction adapts actions that need the application's two-pane workflow.
-// A handled action must return true; other actions retain Micro's behavior.
-var MdiffAction func(string, *BufPane) bool
+// MdiffAction returns whether mdiff handled the action and whether it succeeded.
+// A handled unsuccessful action preserves Micro's action-chain fallback without
+// invoking Micro's unrelated implementation of that action.
+var MdiffAction func(string, *BufPane) (handled, success bool)
 
 // MdiffCommand validates and runs commands from both the prompt and bindings.
 var MdiffCommand func(*BufPane, string)
@@ -666,9 +668,11 @@ func (h *BufPane) execAction(action BufAction, name string, te *tcell.EventMouse
 	}
 
 	var success bool
-	if MdiffAction != nil && MdiffAction(name, h) {
-		success = true
-	} else {
+	handled := false
+	if MdiffAction != nil {
+		handled, success = MdiffAction(name, h)
+	}
+	if !handled {
 		switch a := action.(type) {
 		case BufKeyAction:
 			success = a(h)

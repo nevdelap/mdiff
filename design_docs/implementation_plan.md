@@ -16,6 +16,44 @@ product direction and durable architecture are in
 
 ## Active tasks
 
+### TASK-015 - Restore bundled Micro behavior parity
+
+State: COMPLETED — approved in pass 8 of
+[`micro-behavior-parity-review.md`](../review_docs/micro-behavior-parity-review.md)
+
+Goal:
+
+- Resolve every required finding in the cross-cutting bundled Micro behavior
+  parity review while retaining mdiff's fixed paired-pane and shared-diff view.
+
+Dependencies:
+
+- TASK-014 is merged and the review document is included with this task.
+
+Scope:
+
+- Give bound `QuitAll` one discard-all confirmation. Preserve the action-chain
+  fallback when diff navigation has no target, and navigate from the focused
+  cursor's aligned row.
+- Adapt Micro's cursor and selection page actions to the shared viewport.
+- Parse commands with Micro's shell quoting and exact command-name behavior.
+- Use Micro help buffers and rendering in the overlay, including multiple
+  requested help topics and configured help actions.
+- Match Micro `SaveAll` calls to `Buffer.Save` for both documents.
+- Dispatch wheel bindings to the pane under the pointer without changing focus.
+- Honor and compose Micro scrollbars against the shared viewport. Keep mdiff's
+  diff gutter as the replacement for Micro's VCS diff gutter.
+- Route plugin reload through mdiff's guarded reload policy.
+- Add focused regressions for every reviewed behavior and update the release
+  note and patch version exactly once in this change.
+
+Acceptance criteria:
+
+- All nine findings in the parity review are resolved and covered by permanent
+  regressions against the bundled Micro behavior.
+- The two-pane layout and shared viewport remain intact.
+- Format, lint, full tests, and build pass.
+
 ### TASK-014 - Share Micro's soft-wrap source-position mapping
 
 State: COMPLETED — approved in pass 2 of

@@ -1230,7 +1230,12 @@ func (h *BufPane) HandleCommand(input string) {
 		InfoBar.Error("Error parsing args ", err)
 		return
 	}
+	h.HandleParsedCommand(input, args)
+}
 
+// HandleParsedCommand dispatches an already shell-quoted command argument list.
+// It lets adapters apply policy without parsing or normalizing command names.
+func (h *BufPane) HandleParsedCommand(input string, args []string) {
 	if len(args) == 0 {
 		return
 	}

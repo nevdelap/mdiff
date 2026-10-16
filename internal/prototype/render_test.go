@@ -75,6 +75,37 @@ func TestRenderCharacterDiffAndStylePrecedence(t *testing.T) {
 	}
 }
 
+func TestConfiguredScrollbarAndReplacementBuffer(t *testing.T) {
+	app, sim := newRenderTestApp(t)
+	defer app.Close()
+	content := strings.Repeat("row\n", 40)
+	app.left.buf.Insert(buffer.Loc{}, content)
+	app.right.buf.Insert(buffer.Loc{}, content)
+	app.left.buf.Settings["scrollbar"] = true
+	app.right.buf.Settings["scrollbar"] = true
+	config.GlobalSettings["scrollbarchar"] = "#"
+	app.rebuildWithAnchor(anchor{})
+	app.top = 15
+	app.draw()
+	for _, p := range app.panes() {
+		found := false
+		for y := 0; y < app.rows; y++ {
+			r, _, _, _ := sim.GetContent(p.x+p.width-1, y)
+			found = found || r == '#'
+		}
+		if !found {
+			t.Fatalf("configured scrollbar missing in pane at x=%d", p.x)
+		}
+	}
+	replacement := buffer.NewBufferFromString("replacement\ntext", "", buffer.BTDefault)
+	replacement.Settings["scrollbar"] = true
+	app.left.h.OpenBuffer(replacement)
+	app.syncChangedBuffers()
+	if app.left.buf.Settings["scrollbar"] != true {
+		t.Fatal("file replacement disabled the configured scrollbar")
+	}
+}
+
 func TestFakeCursorUsesOneTerminalCellAndNoPhysicalCursor(t *testing.T) {
 	app, sim := newRenderTestApp(t)
 	defer app.Close()
@@ -727,26 +758,86 @@ func TestVirtualSpacerRowsRenderNoSourceText(t *testing.T) {
 func TestDiffStylePreservesSyntaxForegroundAndCompositionRules(t *testing.T) {
 	syntax := tcell.StyleDefault.Foreground(tcell.ColorAqua).Background(tcell.ColorPurple).Italic(true)
 	row := tcell.StyleDefault.Background(tcell.ColorDarkBlue)
-	got := baseCellStyle(syntax, row)
+	got := baseCellStyle(syntax, row, true, true)
 	fg, bg, attrs := got.Decompose()
-	if fg != tcell.ColorAqua || bg != tcell.ColorDarkBlue || attrs&tcell.AttrItalic == 0 {
-		t.Fatalf("base/hunk composition = (%v,%v,%b), want syntax fg, hunk bg, italic", fg, bg, attrs)
+	if fg != tcell.ColorAqua || bg != tcell.ColorPurple || attrs&tcell.AttrItalic == 0 {
+		t.Fatalf("highlight/hunk composition = (%v,%v,%b), want Micro highlight bg, syntax fg, italic", fg, bg, attrs)
 	}
 
 	withColorscheme(t, map[string]tcell.Style{
 		"diff-deleted": tcell.StyleDefault.Foreground(tcell.ColorRed).Bold(true),
 	})
-	got = characterDiffStyle(row, false)
+	got = characterDiffStyle(got, row, false, true)
 	fg, bg, attrs = got.Decompose()
-	if fg != tcell.ColorRed || bg != tcell.ColorDarkBlue || attrs&tcell.AttrBold == 0 || attrs&tcell.AttrItalic != 0 {
-		t.Fatalf("character diff composition = (%v,%v,%b), want configured style with inherited hunk bg", fg, bg, attrs)
+	if fg != tcell.ColorRed || bg != tcell.ColorPurple || attrs&tcell.AttrBold == 0 || attrs&tcell.AttrItalic != 0 {
+		t.Fatalf("character diff composition = (%v,%v,%b), want configured diff fg with Micro highlight bg", fg, bg, attrs)
 	}
 
 	config.Colorscheme = map[string]tcell.Style{}
-	got = characterDiffStyle(row, true)
+	got = characterDiffStyle(tcell.StyleDefault.Background(tcell.ColorDarkBlue), row, true, false)
 	fg, bg, _ = got.Decompose()
 	if fg != tcell.ColorGreen || bg != tcell.ColorDarkBlue {
 		t.Fatalf("missing added style fallback = (%v,%v), want green on hunk background", fg, bg)
+	}
+}
+
+func TestEqualRowCopyPreservesMicroCellStyle(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	microCell := tcell.StyleDefault.Foreground(tcell.ColorAqua).Background(tcell.ColorPurple).Bold(true)
+	rowStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue)
+	cell := renderedCell{rune: 'x', width: 1, sourceRune: 0, style: microCell}
+	previous := screen.Screen
+	screen.Screen = app.surface
+	defer func() { screen.Screen = previous }()
+	copyLine(&app.left, 0, []renderedCell{cell}, rowStyle, viewport.Row{Kind: compare.Equal}, false, false, 0, nil, nil)
+	_, _, got, _ := app.surface.GetContent(app.left.x, 0)
+	fg, bg, attrs := got.Decompose()
+	if fg != tcell.ColorAqua || bg != tcell.ColorPurple || attrs&tcell.AttrBold == 0 {
+		t.Fatalf("equal row replaced Micro's rendered cell style: (%v,%v,%b)", fg, bg, attrs)
+	}
+}
+
+func TestEqualRowSearchBackgroundSurvivesCursorLineColorCollision(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	withColorscheme(t, map[string]tcell.Style{
+		"hlsearch":    tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorPurple),
+		"cursor-line": tcell.StyleDefault.Foreground(tcell.ColorPurple),
+	})
+	contents := "preceding line\nneedle on equal row"
+	app.left.buf.Insert(buffer.Loc{}, contents)
+	app.right.buf.Insert(buffer.Loc{}, contents)
+	app.left.buf.LastSearch = "needle"
+	app.left.buf.HighlightSearch = true
+	app.left.h.GotoLoc(buffer.Loc{})
+	app.rebuildWithAnchor(anchor{})
+	app.draw()
+	textX := app.left.view.BufView().X
+	_, bg, _ := cellStyle(app.surface, textX, 1)
+	if bg != tcell.ColorPurple {
+		t.Fatalf("search background matching cursor-line color was replaced: got %v, want purple", bg)
+	}
+}
+
+func TestChangedRowSearchBackgroundSurvivesCursorLineColorCollision(t *testing.T) {
+	app, _ := newRenderTestApp(t)
+	defer app.Close()
+	withColorscheme(t, map[string]tcell.Style{
+		"hlsearch":    tcell.StyleDefault.Foreground(tcell.ColorBlack).Background(tcell.ColorPurple),
+		"cursor-line": tcell.StyleDefault.Foreground(tcell.ColorPurple),
+	})
+	app.left.buf.Insert(buffer.Loc{}, "needle on changed row\ncommon")
+	app.right.buf.Insert(buffer.Loc{}, "other on changed row\ncommon")
+	app.left.buf.LastSearch = "needle"
+	app.left.buf.HighlightSearch = true
+	app.left.h.GotoLoc(buffer.Loc{})
+	app.rebuildWithAnchor(anchor{})
+	app.draw()
+	textX := app.left.view.BufView().X
+	_, bg, _ := cellStyle(app.surface, textX, 0)
+	if bg != tcell.ColorPurple {
+		t.Fatalf("changed-row search background matching cursor-line color was replaced: got %v, want purple", bg)
 	}
 }
 

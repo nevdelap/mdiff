@@ -10,6 +10,7 @@ import (
 	"github.com/nevdelap/mdiff/internal/micro/config"
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	"github.com/nevdelap/mdiff/internal/micro/screen"
+	"github.com/nevdelap/mdiff/internal/micro/util"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
@@ -19,6 +20,7 @@ type renderedCell struct {
 	style      tcell.Style
 	width      int
 	sourceRune int
+	preserveBG bool
 }
 
 type renderedLine struct {
@@ -99,6 +101,47 @@ func (a *App) renderPane(p *pane, layout viewport.Layout, top, height int) {
 		lineMasks := masks[cell.Line]
 		copyLine(p, screenY, cells, base, row, p.x != 0, different, lineMasks.runeStart, lineMasks.changed, lineMasks.selected)
 	}
+	a.renderPaneScrollbar(p, layout, top, height)
+}
+
+func (a *App) renderPaneScrollbar(p *pane, layout viewport.Layout, top, height int) {
+	if enabled, _ := p.buf.Settings["scrollbar"].(bool); !enabled || p.buf.LinesNum() <= height || p.width == 0 {
+		return
+	}
+	line := 0
+	for distance := 0; distance < len(layout.Rows); distance++ {
+		found := false
+		for _, row := range []int{top + distance, top - distance} {
+			if row < 0 || row >= len(layout.Rows) {
+				continue
+			}
+			cell := layout.Rows[row].Left
+			if p == &a.right {
+				cell = layout.Rows[row].Right
+			}
+			if cell.Line >= 0 && !cell.Spacer {
+				line, found = cell.Line, true
+				break
+			}
+		}
+		if found {
+			break
+		}
+	}
+	size := max(1, int(float64(height)/float64(p.buf.LinesNum())*float64(height)))
+	start := int(float64(line) / float64(p.buf.LinesNum()) * float64(height))
+	style := config.DefStyle.Reverse(true)
+	if configured, ok := config.Colorscheme["scrollbar"]; ok {
+		style = configured
+	}
+	character, _ := config.GetGlobalOption("scrollbarchar").(string)
+	if util.CharacterCountInString(character) != 1 {
+		character = "|"
+	}
+	r, _, _ := util.DecodeCharacterInString(character)
+	for y := start; y < min(start+size, height); y++ {
+		screen.SetContent(p.x+p.width-1, y, r, nil, style)
+	}
 }
 
 // renderMicroLine asks Micro's BufWindow renderer to paint one logical line
@@ -132,14 +175,27 @@ func (a *App) renderMicroRowMapped(p *pane, line, wrapRow int, positions *displa
 	x, y, width, height := view.X, view.Y, view.Width, view.Height
 	startLine, startCol, active := view.StartLine, view.StartCol, view.IsActive()
 	view.X, view.Y, view.Height = 0, 0, 2
+	scrollbar, _ := p.buf.Settings["scrollbar"].(bool)
+	if scrollbar {
+		view.Width--
+		p.buf.Settings["scrollbar"] = false
+	}
 	view.StartLine = display.SLoc{Line: line, Row: wrapRow}
 	view.SetActive(active)
 	compositionScreen := screen.Screen
 	a.paintScreen.Clear()
 	screen.Screen = a.paintScreen
 	view.SuppressCursor = true
+	previousBackgroundHook := view.BackgroundPreserved
+	preservedBackgrounds := make(map[int]bool)
+	view.BackgroundPreserved = func(loc buffer.Loc, preserve bool) {
+		if preserve && loc.Y == line {
+			preservedBackgrounds[loc.X] = true
+		}
+	}
 	view.Display()
 	view.SuppressCursor = false
+	view.BackgroundPreserved = previousBackgroundHook
 
 	row := make([]renderedCell, p.width)
 	for col := 0; col < p.width; col++ {
@@ -149,11 +205,20 @@ func (a *App) renderMicroRowMapped(p *pane, line, wrapRow int, positions *displa
 	rows := [][]renderedCell{row}
 	if positions != nil {
 		annotateSourceRunes(p, rows, wrapRow, *positions)
+		if positions.RuneOffset >= 0 {
+			for col := range row {
+				runeIndex := row[col].sourceRune - positions.RuneOffset
+				if runeIndex >= 0 && runeIndex < len(positions.Character) {
+					row[col].preserveBG = preservedBackgrounds[positions.Character[runeIndex]]
+				}
+			}
+		}
 	}
 	screen.Screen = compositionScreen
 
 	view.X, view.Y, view.Width, view.Height = x, y, width, height
 	view.StartLine, view.StartCol = startLine, startCol
+	p.buf.Settings["scrollbar"] = scrollbar
 	view.Resize(width, height)
 	view.StartLine, view.StartCol = startLine, startCol
 	view.SetActive(active)
@@ -348,10 +413,10 @@ func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, 
 		if cell.width == 0 {
 			continue
 		}
-		style := baseCellStyle(cell.style, rowStyle)
+		style := baseCellStyle(cell.style, rowStyle, different, cell.preserveBG)
 		localRune := cell.sourceRune - runeStart
 		if different && localRune >= 0 && localRune < len(changed) && changed[localRune] {
-			style = characterDiffStyle(rowStyle, right)
+			style = characterDiffStyle(style, rowStyle, right, cell.preserveBG)
 		}
 		if localRune >= 0 && localRune < len(selected) && selected[localRune] {
 			style = selectionStyle()
@@ -360,13 +425,36 @@ func copyLine(p *pane, screenY int, cells []renderedCell, rowStyle tcell.Style, 
 	}
 }
 
-func baseCellStyle(syntax, row tcell.Style) tcell.Style {
-	fg, _, attrs := syntax.Decompose()
-	_, bg, _ := row.Decompose()
+func baseCellStyle(micro, row tcell.Style, different, preserveBG bool) tcell.Style {
+	fg, bg, attrs := micro.Decompose()
+	_, rowBG, _ := row.Decompose()
+	_, defaultBG, _ := config.DefStyle.Decompose()
+	if !different {
+		if bg == tcell.ColorDefault || bg == defaultBG {
+			bg = rowBG
+		}
+		return applyAttributes(tcell.StyleDefault.Foreground(fg).Background(bg), attrs)
+	}
+	if bg == tcell.ColorDefault || bg == defaultBG || (!preserveBG && isCursorLineBackground(bg)) {
+		// The row background supplies mdiff's current-line/diff adaptation
+		// wherever Micro leaves its ordinary theme background in place.
+		bg = rowBG
+	}
+	// On changed rows, explicit Micro backgrounds (search, syntax, brace,
+	// and whitespace highlights) remain above the diff color.
 	return applyAttributes(tcell.StyleDefault.Foreground(fg).Background(bg), attrs)
 }
 
-func characterDiffStyle(row tcell.Style, right bool) tcell.Style {
+func isCursorLineBackground(bg tcell.Color) bool {
+	style, ok := config.Colorscheme["cursor-line"]
+	if !ok {
+		return false
+	}
+	fg, _, _ := style.Decompose()
+	return fg != tcell.ColorDefault && bg == fg
+}
+
+func characterDiffStyle(cell, row tcell.Style, right bool, preserveBG bool) tcell.Style {
 	name, fallback := "diff-deleted", tcell.ColorRed
 	if right {
 		name, fallback = "diff-added", tcell.ColorGreen
@@ -376,11 +464,18 @@ func characterDiffStyle(row tcell.Style, right bool) tcell.Style {
 		style = tcell.StyleDefault.Foreground(fallback)
 	}
 	fg, bg, attrs := style.Decompose()
+	_, cellBG, _ := cell.Decompose()
+	_, rowBG, _ := row.Decompose()
+	_, defaultBG, _ := config.DefStyle.Decompose()
 	if fg == tcell.ColorDefault {
 		fg = fallback
 	}
-	if bg == tcell.ColorDefault {
-		_, bg, _ = row.Decompose()
+	if preserveBG && cellBG != tcell.ColorDefault && cellBG != defaultBG {
+		// Character diff foreground wins; any explicit Micro highlight
+		// background remains visible beneath it.
+		bg = cellBG
+	} else if bg == tcell.ColorDefault {
+		bg = rowBG
 	}
 	return applyAttributes(tcell.StyleDefault.Foreground(fg).Background(bg), attrs)
 }
