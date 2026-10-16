@@ -93,10 +93,11 @@ change.
 Markdown uses `mdformat` with an 80-column wrap and Markdownlint settings in
 `.mdformat.toml` and `.markdownlint.yaml`. Workflow YAML uses `yamlfmt` and
 `yamllint`; `just --fmt` formats the Justfile. The Justfile pins the formatter
-and lint container image digests. Completed review records are retained in
-repository history; active follow-up lives in `design_docs/future_work.html`. CI
-runs Go tests, vet, and builds on Linux and macOS. Adjust CI timeouts using
-observed job runtime, with room for cache misses and dependency downloads.
+and lint container image digests. Completed task specifications and review
+records are removed from active documentation; Jujutsu history retains them.
+Active work is listed in `design_docs/implementation_plan.md`. CI runs Go tests,
+vet, and builds on Linux and macOS. Adjust CI timeouts using observed job
+runtime, with room for cache misses and dependency downloads.
 
 Package-local coverage figures are diagnostics, not an integration coverage
 percentage. Copied Micro packages without package-local tests may report zero

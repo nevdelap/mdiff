@@ -7,11 +7,10 @@ tasks. Each task should have one implementer who completes the scoped work and
 one reviewer who independently checks it. The roles may be performed by separate
 people or agent sessions.
 
-The implementation plan points to active tasks and
-`design_docs/future_work.html` records open follow-up work. Both roles work from
-the same written task specification. Do not expand or reduce a task's scope
-during implementation; record a planning change first when the specification
-needs to change.
+The implementation plan lists active tasks. Both roles work from the same
+written task specification. Do not expand or reduce a task's scope during
+implementation; record a planning change first when the specification needs to
+change.
 
 ## Igor — implementer
 
@@ -49,9 +48,9 @@ Rufus records findings in `review_docs/<task-id>.md`, updating that document on
 later passes. Findings identify the evidence, impact, and required resolution.
 If material findings remain, the task stays in review. When all findings are
 resolved and applicable checks pass, Rufus records approval and marks the task
-complete in the implementation plan. Move any remaining follow-up to
-`design_docs/future_work.html` and remove the finished task and review
-documents; the repository history retains them.
+complete in the implementation plan. Add follow-up work to the plan as a new
+task, then remove the completed task specification and review record; Jujutsu
+history retains the detailed record.
 
 Rufus does not modify implementation source or tests while reviewing. If a fix
 is needed, Rufus returns the finding to Igor.
