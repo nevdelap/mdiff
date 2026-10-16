@@ -133,9 +133,11 @@ Dark themes use the documented dark defaults; light themes derive pale
 backgrounds. A theme that leaves its background to the terminal also leaves row
 backgrounds to the terminal, with divider marks retaining coarse-diff
 visibility. The [README](../README.md#micro-configuration) lists the groups and
-behavior. The visual-position calculation in `sourceRuneLocations` still
-duplicates part of Micro's wrap mapping and is tracked in
-[future work](future_work.html#wrap-mapping).
+behavior. Micro's display package scans decoded characters for both cursor
+locations and a batch of Go rune boundaries used by mdiff's renderer. The batch
+also maps rune boundaries to Micro character offsets: a base rune owns its
+combining marks and their shared visual cells. mdiff translates Micro selection
+endpoints from character offsets before applying rune-based change styles.
 
 ## Performance and verification
 

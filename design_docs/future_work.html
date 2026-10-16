@@ -14,16 +14,14 @@
 <body>
   <main>
     <h1>Future work</h1>
-    <p>These are the open findings from the completed project and Micro behavior
-      reviews. They are follow-up work after the first usable release; none
-      blocks that release. Their ordered scope and acceptance criteria are now
-      in the <a href="implementation_plan.md">implementation plan</a>.</p>
+    <p>The findings from the project and Micro behavior reviews are tracked in
+      the <a href="implementation_plan.md">implementation plan</a>. TASK-014
+      is implemented and awaiting independent review.</p>
 
     <section id="wrap-mapping">
       <h2>TASK-014: Share soft-wrap source-position mapping with Micro</h2>
-      <p>Move the visual-position calculation in
-        <code>sourceRuneLocations</code> into a shared Micro API and call it
-        from mdiff. Keep the calculation linear in the length of each line.</p>
+      <p>The shared Micro scanner now supplies cursor locations and batched
+        rune boundaries for diff rendering.</p>
       <p>See <a href="implementation_plan.md#task-014---share-micros-soft-wrap-source-position-mapping">TASK-014</a>
         for scope and acceptance criteria.</p>
     </section>

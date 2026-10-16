@@ -602,8 +602,7 @@ func (a *App) wrapHeight(p *pane, line int) int {
 		side = viewport.Right
 	}
 	return a.lineHeights.height(side, line, p.view.Width, int(tabSize), softwrap, wordwrap, func() int {
-		end := len([]rune(p.buf.Line(line)))
-		return p.view.VLocFromLoc(buffer.Loc{X: end, Y: line}).Row + 1
+		return p.view.LineEndVLoc(line).Row + 1
 	})
 }
 

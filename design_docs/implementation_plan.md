@@ -1,8 +1,7 @@
 # Implementation Plan
 
 TASK-001 through TASK-013 are complete. Earlier implementation and review
-history is available in the repository history. TASK-013's approved handoff
-remains below until its change is merged.
+history is available in the repository history.
 
 The tasks below are ordered from most to least valuable and must be implemented
 in that order. Complete each task in one Jujutsu change, with exactly one patch
@@ -17,109 +16,10 @@ product direction and durable architecture are in
 
 ## Active tasks
 
-### TASK-013 - Complete the blocked-command audit
-
-State: COMPLETED
-
-Goal:
-
-- Account for every registered Micro command denied by `safeCommand`, and
-  restore any command that can preserve mdiff's fixed panes and shared viewport.
-
-Dependencies:
-
-- TASK-012 is `COMPLETED`, including its terminal ownership changes.
-
-Scope:
-
-- Audit the complete denied built-in list in `internal/prototype/app.go`:
-  `vsplit`, `hsplit`, `tab`, `tabmove`, `tabswitch`, `term`, `eval`, `log`,
-  `plugin`, `reload`, and `raw`. Record each command's actual behavior in the
-  pinned Micro source and the specific mdiff invariant it would affect.
-- Record that `raw` opens another tab, `log` and `plugin` open a log view, and
-  bundled Micro's `eval` reports unsupported. Assess `reload` in detail for
-  settings, bindings, plugins, colorscheme, buffer settings, the fixed panes,
-  and the shared viewport. If it is safe, route it through Micro and refresh
-  mdiff-owned state as needed; otherwise retain the guard and document the exact
-  invariant it breaks.
-- Include `mdiff.diff-debounce-ms` in the `reload` decision. If `reload` is
-  allowed, a valid reloaded value takes effect immediately in the running diff
-  coordinator. Restart an already pending debounce from the reload instant using
-  the new delay; a CLI override still wins and leaves its timer unchanged. Use
-  the startup resolver and its 40–180 ms rule before invoking Micro's reload.
-  Without a CLI override, an invalid value must produce a visible error and
-  leave the previous effective delay, pending timer, and Micro settings intact.
-  With a valid CLI override, the file value is ignored as at startup. If
-  `reload` remains denied, document the mismatch between reloaded settings and
-  the coordinator's startup delay as one concrete reason.
-- Update command documentation, focused command-routing tests, the technical
-  design, and release notes. Keep rejection messages visible for commands that
-  remain unsupported.
-
-Out of scope:
-
-- Creating extra tabs, panes, log views, or independent vertical viewports.
-- Replacing Micro's command registry or adding a second executable-level
-  behavior matrix.
-
-Acceptance criteria:
-
-- Every denied registered built-in command has a documented source-backed reason
-  or a tested adapter that preserves exactly two panes and one shared vertical
-  viewport. The documented list matches the actual guard.
-- `reload` has an explicit decision. If allowed, a regression covers invoking it
-  from the command bar after editing both panes and verifies bindings, settings,
-  colors, focus, buffer identity, diff alignment, and subsequent input. If
-  denied, the documented reason identifies the concrete invariant or lifecycle
-  failure demonstrated by source inspection or a focused test. The decision also
-  states whether the debounce setting is live or why `reload` remains blocked.
-- If `reload` is allowed, deterministic coordinator tests verify actual
-  scheduling after a valid changed debounce, an invalid changed value without a
-  CLI override, and a CLI override, with a debounce already pending in each
-  case. Invalid input leaves the prior effective delay and timer schedule in
-  place; a valid reload restarts a pending timer from the reload instant.
-- Allowed commands continue to reach Micro in the focused pane; blocked commands
-  produce a visible explanation and do not alter pane state.
-- The patch version is bumped once in this task's single Jujutsu change, and the
-  release note and exact-version assertions agree.
-
-Verification:
-
-- `just format`
-- `just lint`
-- `just test`
-- `just build`
-- `just test-pty` if terminal-facing command behavior changes.
-
-Handoff:
-
-- Audited all eleven formerly denied registered built-ins against the pinned
-  Micro handlers. `eval` reaches Micro's `Eval unsupported` message. The other
-  ten commands remain visibly denied because they create or move views, replace
-  a pane, require a coordinated runtime reload, or can repeat a plugin
-  activation callback after resize. The technical design records each source
-  path and invariant.
-- Kept `reload` blocked: Micro reapplies settings, bindings, plugins,
-  colorscheme, and buffer settings without rebuilding mdiff's aligned viewport;
-  `mdiff.diff-debounce-ms` is resolved at startup and the running coordinator
-  retains that delay and its pending timer. README command guidance and focused
-  routing tests cover the decision and unchanged pane state.
-- Updated the patch version and release notes once in this JJ change. Removed
-  TASK-012's approved specification and review from active documents; both
-  remain in repository history.
-- Verification passed: `just format`, `just lint`, `just test`, `just build`,
-  and `just test-pty` on Linux. macOS behavior remains for CI or independent
-  review.
-- Addressed review pass 1 by restoring the `tabswitch` guard. A resize replaces
-  mdiff's Micro tab without marking that tab active, so Micro's `tabswitch 1`
-  could repeat a plugin `onSetActive` callback. The command documentation and
-  routing regression now cover the guarded behavior after resize; `eval` remains
-  routed to Micro.
-- Independent review pass 2 found no open findings and approved completion.
-
 ### TASK-014 - Share Micro's soft-wrap source-position mapping
 
-State: NEW
+State: COMPLETED — approved in pass 2 of
+[`TASK-014-implementation-review.md`](../review_docs/TASK-014-implementation-review.md)
 
 Goal:
 
@@ -188,3 +88,52 @@ Verification:
 - `just build`
 - Run the focused mapping and rendering tests and both long-line benchmarks;
   record their commands and results.
+
+Handoff:
+
+- Added one Micro-owned decoded-character scanner for cursor locations, line
+  ends, and one-pass rune-boundary maps. The renderer uses the batch map for
+  changed cells and selection offsets; wrap-height lookup uses Micro character
+  units. Removed mdiff's duplicate source-position calculation.
+
+- Added exact visual-position cases and regressions for combining marks,
+  selection after a mark cluster, a mark-only change, and changed text crossing
+  a visual wrap. The existing Unicode, tab, wrapping, selection, and aligned-row
+  tests also pass.
+
+- Benchmarked on Linux amd64, Ryzen 7 5700U, with a 40-column soft- and
+  word-wrapped line of repeated `word<TAB>界e◌́ ` groups. The command was
+  `go test ./internal/micro/display -run '^$' -bench 'Benchmark(RuneBoundariesLongLine|CursorPositionLongLine)$' -benchmem -benchtime=100ms -count=1`.
+  At 512/1024/2048 groups (6144/12288/24576 bytes), batch scans took
+  0.800/1.738/3.025 ms and 635/1618/2898 kB per operation, with 563/1083/2114
+  allocations. Uncached cursor queries at increasing offsets took
+  0.118/0.230/0.446 ms and 2.5/4.1/7.2 kB per operation, with 195/387/768
+  allocations. Batch time grew approximately with line length; the cursor path
+  allocated no full-line rune map.
+
+- `just format`, `just lint`, `just test`, and `just build` passed on Linux.
+  Focused display and renderer tests passed with
+  `go test ./internal/micro/display ./internal/prototype -run 'Test(RuneBoundaries|SelectionAfterCombiningCluster|ChangedTextSpanningVisualWrap|MarkOnlyChangeHighlightsBaseCell)' -count=1`.
+  The patch version and exact-version assertion changed once in this JJ change.
+
+- Addressed implementation review pass 1 in the same change without another
+  version bump. Public negative Micro locations again resolve to line start;
+  private line-end scans retain a separate sentinel. Unwrapped annotation now
+  maps only source characters intersecting the visible horizontal range and
+  stops at its right edge, preserving absolute rune and character offsets.
+
+- Added regressions for negative locations with soft wrap enabled and disabled,
+  and a horizontally scrolled 10,001-character changed line. Added
+  `BenchmarkRenderUnwrappedLongLineAnnotations`, which redraws two
+  1,048,577-character unwrapped lines around their changed midpoint.
+  `go test ./internal/prototype -run '^$' -bench '^BenchmarkRenderUnwrappedLongLineAnnotations$' -benchmem -benchtime=500ms -count=1`
+  measured 182.5 ms/op, 10.8 MB/op and 3312 allocs/op on Linux amd64, Ryzen 7
+  5700U. The benchmark includes the full renderer redraw; the visible source map
+  itself is bounded by the pane width.
+
+- After these fixes, `just format`, `just lint`, `just test`, and `just build`
+  passed. The focused review regressions passed with this command:
+
+  ```sh
+  go test ./internal/micro/display ./internal/prototype -run 'Test(Negative|Visible|UnwrappedHorizontal|RuneBoundaries|SelectionAfter|ChangedTextSpanning|MarkOnlyChange)' -count=1
+  ```
