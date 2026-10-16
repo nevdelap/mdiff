@@ -1,9 +1,8 @@
 # mdiff: Technical Design
 
-This document describes the implemented architecture. The
-[future work list](future_work.html) contains the remaining review findings; the
-[prototype record](micro_integration_prototype.md) contains the original Micro
-source audit and refresh procedure.
+This document describes the current product contract and implemented
+architecture. The [implementation plan](implementation_plan.md) lists active
+tasks.
 
 ## Product contract
 
@@ -28,9 +27,26 @@ documents commands, configuration, colors, and known compatibility limits.
 Micro's upstream packages live under its `internal/` tree, so mdiff cannot
 import them directly from another module. The copied source is rehomed below
 mdiff's own `internal/micro/` boundary, with imports rewritten. The pinned
-revision, original patch inventory, and upstream refresh steps are in the
-[prototype record](micro_integration_prototype.md). Keep that subtree's license
-and third-party notices with the copied source.
+revision and refresh procedure are in
+[Vendored Micro source](#vendored-micro-source). Keep that subtree's license and
+third-party notices with the copied source.
+
+## Vendored Micro source
+
+The source is pinned to Micro v2.0.15 at commit
+[`6a62575bcfdf4965f187eedafceb3400316e612b`](https://github.com/zyedidia/micro/commit/6a62575bcfdf4965f187eedafceb3400316e612b).
+The selected Go packages, runtime assets, tests, and upstream dependency
+versions are kept under `internal/micro/` so Go's `internal` import boundary
+allows mdiff to adapt the editor. The upstream and third-party notices are
+`internal/micro/LICENSE` and `internal/micro/LICENSE-THIRD-PARTY`.
+
+To refresh the vendored source, check out the recorded upstream tag and commit,
+copy the required production package closure, tests, runtime assets, and
+notices, then rewrite imports to the mdiff namespace. Compare the refreshed tree
+against the current subtree and reapply mdiff's integration patches after
+reviewing them against the new upstream code. Keep both license files intact.
+Run the vendored package tests, simulation tests, and PTY checks before updating
+the pinned revision and documenting the patch inventory.
 
 ## Pane and terminal lifecycle
 
@@ -145,7 +161,7 @@ Comparison must remain outside terminal input handling. The reference profile is
 Ubuntu 24.04 on four allocated CPUs and 8 GiB RAM. The measured gates cover a 1
 MiB paste becoming visible within 250 ms, a coarse fallback within 2 s for
 adversarial input, and a 512 MiB RSS ceiling for the defined 10 MiB fixture. The
-exact fixture, environment, measurements, and limitations are in the
-[TASK-009 performance report](task_009_performance_report.md). `just bench`
-reruns the benchmark suite. `just check` runs the project quality, test, and
-build gates; CI also covers supported Linux and macOS targets.
+recorded reference run measured about 213 ms for paste-to-visible and 50.83 MiB
+peak RSS. Workload generators are pinned in `internal/perfworkload`;
+`just bench` reruns the benchmark suite. `just check` runs the project quality,
+test, and build gates; CI also covers supported Linux and macOS targets.

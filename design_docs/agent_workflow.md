@@ -2,14 +2,13 @@
 
 This document describes the task and review workflow for `mdiff`. Role
 responsibilities are in [`docs/roles.md`](../docs/roles.md). The implementation
-plan points to active work in [`future_work.html`](future_work.html). A scoped
-task records its dependencies, acceptance criteria, and state before
-implementation begins.
+plan lists active work. A scoped task records its dependencies, acceptance
+criteria, and state before implementation begins.
 
 ## Task definition
 
-Before implementation, turn an item in the future-work list into a complete task
-in the implementation plan. It must include:
+Before implementation, add a complete task to the implementation plan. It must
+include:
 
 - a goal describing the outcome;
 - dependencies and any required prior decisions;
@@ -51,11 +50,11 @@ does not mark a task complete while material findings remain.
    `review_docs/<task-id>.md`; the task moves to `REVIEW` if findings remain.
 5. Igor resolves findings without changing the task's scope. Rufus reviews the
    full updated change and updates the same review document.
-6. After approval, Rufus records the final decision and marks the task
-   `COMPLETED`. Move any outstanding follow-up to `future_work.html`, then
-   remove the completed task specification and review record from the active
-   documents. Repository history retains the decision and task details.
-   Dependent work can then begin.
+6. After approval, Rufus marks the task `COMPLETED` and records the final
+   decision. Add any follow-up work to the implementation plan as a new task,
+   then remove the completed task specification and review record from active
+   documents. Jujutsu history retains the decision and task details. Dependent
+   work can then begin.
 
 Review documents should include the task identifier, review pass, decision,
 findings with evidence, and verification commands and results. Preserve prior

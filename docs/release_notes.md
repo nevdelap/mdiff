@@ -77,5 +77,4 @@ Micro source and third-party notices remain under `internal/micro/`.
   remove APIs required by the vendored Micro integration.
 - Configured Micro backup and autosave settings can write document artifacts;
   ordinary exit does not save unsaved buffers without an explicit save choice.
-- Linux and macOS release verification runs in the GitHub Actions build and
-  release jobs; release hashes are recorded in the TASK-010 handoff.
+- Linux and macOS builds and tests run in GitHub Actions.
