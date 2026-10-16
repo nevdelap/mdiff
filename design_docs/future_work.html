@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mdiff future work</title>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; line-height: 1.55; }
+    body { max-width: 54rem; margin: 2rem auto; padding: 0 1rem; }
+    h1, h2 { line-height: 1.2; }
+    code { font-family: ui-monospace, monospace; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Future work</h1>
+    <p>These are the open findings from the completed project and Micro behavior
+      reviews. They are follow-up work after the first usable release; none
+      blocks that release. Their ordered scope and acceptance criteria are now
+      in the <a href="implementation_plan.md">implementation plan</a>.</p>
+
+    <section id="terminal-handoff">
+      <h2>TASK-012: Restore Micro shell and suspend actions</h2>
+      <p>Coordinate Micro's <code>ShellMode</code> and <code>Suspend</code> with
+        mdiff's terminal event reader and shared two-pane screen. The actions
+        currently remain blocked because terminal ownership cannot be handed
+        over safely.</p>
+      <p>See <a href="implementation_plan.md#task-012---restore-interactive-shell-and-suspend-actions">TASK-012</a>
+        for scope and acceptance criteria.</p>
+    </section>
+
+    <section id="command-audit">
+      <h2>TASK-013: Finish the blocked-command audit</h2>
+      <p>Review every built-in command denied by <code>safeCommand</code>.
+        Record that <code>raw</code> opens another tab, <code>log</code> and
+        <code>plugin</code> open a log view, and bundled Micro's
+        <code>eval</code> reports unsupported. Assess <code>reload</code>
+        against the fixed panes and shared viewport. Route it through Micro
+        with a regression test if safe; otherwise document the exact invariant
+        it breaks.</p>
+      <p>See <a href="implementation_plan.md#task-013---complete-the-blocked-command-audit">TASK-013</a>
+        for scope and acceptance criteria.</p>
+    </section>
+
+    <section id="wrap-mapping">
+      <h2>TASK-014: Share soft-wrap source-position mapping with Micro</h2>
+      <p>Move the visual-position calculation in
+        <code>sourceRuneLocations</code> into a shared Micro API and call it
+        from mdiff. Keep the calculation linear in the length of each line.</p>
+      <p>See <a href="implementation_plan.md#task-014---share-micros-soft-wrap-source-position-mapping">TASK-014</a>
+        for scope and acceptance criteria.</p>
+    </section>
+  </main>
+</body>
+</html>

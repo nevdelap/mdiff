@@ -1,5 +1,11 @@
 # Micro integration prototype findings
 
+This is the historical TASK-002 prototype record. Current product behavior is
+documented in the [README](../README.md) and the
+[technical design](micro_diff_editor.md). The patch inventory below describes
+the original prototype; inspect the current `internal/micro/` subtree when
+refreshing the vendored source.
+
 ## Decision
 
 The TASK-002 prototype is a **GO** for the namespaced Micro source subtree. The
@@ -95,13 +101,14 @@ No upstream checkout or source repository is modified. The pinned license files
 remain with the copied source. To refresh, check out the exact upstream Micro
 tag and commit recorded above; copy the production dependency closure, runtime
 assets, tests, and notices; re-run the import rewrite; then review and re-apply
-the four behavioral patches listed above against the new upstream files. Do not
-replace `internal/micro/LICENSE` or `LICENSE-THIRD-PARTY` with mdiff's license
-text. Compare the refreshed tree against the previous pin with
-`jj diff --summary` and `difft` where available, record the new upstream commit
-and changed patch inventory here, and run the vendored package tests, simulation
-tests, and PTY checks. This procedure keeps upstream notices with the copied
-code and makes patch review repeatable.
+the current subtree's behavioral patches against the new upstream files, using
+the original four listed above as historical context. Do not replace
+`internal/micro/LICENSE` or `LICENSE-THIRD-PARTY` with mdiff's license text.
+Compare the refreshed tree against the previous pin with `jj diff --summary` and
+`difft` where available, record the new upstream commit and changed patch
+inventory here, and run the vendored package tests, simulation tests, and PTY
+checks. This procedure keeps upstream notices with the copied code and makes
+patch review repeatable.
 
 ## Compatibility limits discovered in the prototype
 
@@ -144,8 +151,7 @@ settings, bindings, recovery, or buffer files.
 
 The prototype keeps full-buffer line snapshots and recalculates alignment
 synchronously after each input event. This validates correctness and integration
-boundaries, not the production latency target for very large pastes. Debounced
-or incremental comparison and large-input benchmarks remain later work.
-Character-level changed-span computation remains deferred follow-up work. The
-visible-cursor issue found in manual use was resolved during review and is now
-covered by simulation and PTY checks.
+boundaries, not the production latency target for very large pastes. Production
+implementation later added debounced comparison, large-input benchmarks, and
+character-level changed spans. The visible-cursor issue found in manual use was
+resolved during review and is now covered by simulation and PTY checks.

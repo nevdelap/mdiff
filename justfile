@@ -32,7 +32,7 @@ install-tools:
 # Format Go, Markdown, and this Justfile.
 format:
     go fmt ./...
-    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat README.md docs design_docs review_docs/project_review_2026-10-13.md review_docs/micro_behavior_compatibility_review_2026-10-13.md
+    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat README.md docs design_docs
     docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir {{ YAMLFMT_IMAGE }} .github/workflows/ci.yml .github/dependabot.yml
     just --fmt --unstable
 
@@ -49,7 +49,7 @@ format-check:
             exit 1
         fi
     fi
-    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat --check README.md docs design_docs review_docs/project_review_2026-10-13.md review_docs/micro_behavior_compatibility_review_2026-10-13.md
+    UV_CACHE_DIR={{ UV_CACHE_DIR }} UV_TOOL_DIR={{ UV_TOOL_DIR }} uv tool run --from mdformat==0.7.22 --with mdformat-tables==1.0.0 mdformat --check README.md docs design_docs
     docker run --rm -v "$(pwd):/workdir" -w /workdir {{ YAMLFMT_IMAGE }} -lint .github/workflows/ci.yml .github/dependabot.yml
     just --fmt --check --unstable
 
@@ -67,7 +67,13 @@ lint-yaml:
 
 # Lint Markdown using the same containerized tool as the stay project.
 lint-markdown:
-    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir {{ MARKDOWNLINT_IMAGE }} README.md docs design_docs review_docs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    paths=(README.md docs design_docs)
+    if [[ -d review_docs ]]; then
+        paths+=(review_docs)
+    fi
+    docker run --rm -u "$(id -u):$(id -g)" -v "$(pwd):/workdir" -w /workdir {{ MARKDOWNLINT_IMAGE }} "${paths[@]}"
 
 # Run the complete Go test suite.
 test:

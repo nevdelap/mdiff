@@ -2,13 +2,14 @@
 
 This document describes the task and review workflow for `mdiff`. Role
 responsibilities are in [`docs/roles.md`](../docs/roles.md). The implementation
-plan is the source of truth for task scope, dependencies, acceptance criteria,
-and task state.
+plan points to active work in [`future_work.html`](future_work.html). A scoped
+task records its dependencies, acceptance criteria, and state before
+implementation begins.
 
 ## Task definition
 
-Before implementation, add a complete task to the implementation plan. It must
-include:
+Before implementation, turn an item in the future-work list into a complete task
+in the implementation plan. It must include:
 
 - a goal describing the outcome;
 - dependencies and any required prior decisions;
@@ -51,11 +52,15 @@ does not mark a task complete while material findings remain.
 5. Igor resolves findings without changing the task's scope. Rufus reviews the
    full updated change and updates the same review document.
 6. After approval, Rufus records the final decision and marks the task
-   `COMPLETED`. Dependent work can then begin.
+   `COMPLETED`. Move any outstanding follow-up to `future_work.html`, then
+   remove the completed task specification and review record from the active
+   documents. Repository history retains the decision and task details.
+   Dependent work can then begin.
 
 Review documents should include the task identifier, review pass, decision,
 findings with evidence, and verification commands and results. Preserve prior
-findings as addressed or open on later passes; do not erase review history.
+findings as addressed or open during review. Completed review records do not
+remain in the active documentation.
 
 ## Repository and change workflow
 
@@ -98,7 +103,3 @@ implementation violates the intended behavior. Do not weaken assertions, remove
 coverage, suppress useful failure output, add arbitrary retries, or change
 inputs just to turn a failing test green. If the test contract itself is
 ambiguous, resolve that in the task specification before changing the test.
-
-Add durable lessons from completed tasks to
-[`lessons_learned.md`](lessons_learned.md) when the project has accumulated
-reusable findings.
