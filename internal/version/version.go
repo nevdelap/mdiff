@@ -2,4 +2,4 @@
 package version
 
 // Version is the user-facing mdiff release version.
-const Version = "v0.0.3"
+const Version = "v0.0.4"

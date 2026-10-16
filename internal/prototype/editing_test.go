@@ -208,7 +208,7 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 			t.Errorf("menu row %q does not contain %q", row2, label)
 		}
 	}
-	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.3") {
+	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.4") {
 		t.Fatalf("right-aligned menu indicators missing: row1=%q row2=%q", row1, row2)
 	}
 	app.handle(key(tcell.KeyCtrlW, 0, tcell.ModCtrl))

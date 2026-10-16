@@ -839,7 +839,7 @@ func safeCommand(command string) bool {
 		return false
 	}
 	switch command {
-	case "vsplit", "hsplit", "tab", "tabmove", "tabswitch", "term", "eval", "log", "plugin", "reload", "raw":
+	case "vsplit", "hsplit", "tab", "tabmove", "tabswitch", "term", "log", "plugin", "reload", "raw":
 		return false
 	}
 	return true

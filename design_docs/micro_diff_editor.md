@@ -56,6 +56,44 @@ and reader, installs any completed diff result through the existing version
 check, then redraws the shared two-pane viewport. A restart failure returns an
 error after terminal cleanup instead of using the released screen.
 
+## Built-in command boundary
+
+`internal/prototype/app.go` routes registered Micro commands to the focused
+pane, except for the ones that remain guarded in this audit. The source
+references are in the pinned `internal/micro/action` copy. mdiff has exactly one
+Micro tab holding two fixed `BufPane` instances, plus one shared vertical
+viewport.
+
+| Command     | Pinned Micro behavior                                                                                                                      | mdiff decision                                                                                                                          |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `vsplit`    | `VSplitCmd` creates a vertical split and may open file buffers.                                                                            | Block: a third pane has no paired viewport or mdiff owner. `VSplitIndex` guards the missing Micro split tree.                           |
+| `hsplit`    | `HSplitCmd` creates a horizontal split and may open file buffers.                                                                          | Block: a third pane has no paired viewport or mdiff owner. `HSplitIndex` guards the missing split tree.                                 |
+| `tab`       | `NewTabCmd` creates buffers and calls `Tabs.AddTab`.                                                                                       | Block: an extra tab breaks the fixed two-pane session; `AddTab` rejects mdiff's layout.                                                 |
+| `tabmove`   | `TabMoveCmd` removes the active tab and reinserts it at an index.                                                                          | Block: `Tabs.RemoveTab` rejects removal in mdiff, but the command continues to append the tab, duplicating it.                          |
+| `tabswitch` | `TabSwitchCmd` selects an existing tab through `Tabs.SetActive`.                                                                           | Block: there is no second tab. A resize creates a new tab with `isActive` false, so selecting it repeats the plugin `onSetActive` hook. |
+| `term`      | `TermCmd` starts a terminal and `openTerm` replaces a pane (or creates a tab in a single-pane layout).                                     | Block: replacement loses one of the two editable buffers and its diff owner.                                                            |
+| `eval`      | `EvalCmd` only reports `Eval unsupported`.                                                                                                 | Allow: Micro's own visible message has no layout or buffer side effect.                                                                 |
+| `log`       | `ToggleLogCmd` calls `OpenLogBuf` or quits the log pane.                                                                                   | Block: `OpenLogBuf` requires a horizontal split; its nil result on mdiff's layout is then dereferenced.                                 |
+| `plugin`    | `PluginCmd` opens the log buffer before plugin management.                                                                                 | Block: its log view requires a third pane; plugin commands registered by loaded plugins still use the normal focused-pane route.        |
+| `reload`    | `ReloadCmd` calls `reloadRuntime(true)`, replacing runtime files, plugins, settings, bindings, commands, colorscheme, and buffer settings. | Block: the reload is not transactional with mdiff's pane layout, shared viewport, and diff coordinator.                                 |
+| `raw`       | `RawCmd` creates a raw-event pane in a new tab.                                                                                            | Block: an extra tab has no paired viewport; `Tabs.AddTab` rejects it.                                                                   |
+
+`reloadRuntime` reads settings and applies them one by one through
+`doSetGlobalOptionNative`; `infobar` and `keymenu` invoke `Tabs.Resize`, while
+buffer settings reload can change wrap geometry. Neither path calls mdiff's
+`App.resize` or rebuilds its current aligned viewport. The routine then resets
+bindings and command registration, initializes plugins, and changes the
+colorscheme without a rollback path if a later step fails. Also,
+`resolveDebounce` validates `mdiff.diff-debounce-ms` against its 40–180 ms rule
+only at startup, and the coordinator retains that value in `baseDelay`. Letting
+Micro reload settings would therefore show a new debounce setting while existing
+and future pending diff timers still use the old delay. A CLI `--diff-debounce`
+override would continue to win, but it does not make the rest of Micro's reload
+safe. The command remains blocked until a coordinated reload can validate
+settings before mutation and update mdiff-owned state and pending timers
+atomically. Editing `settings.json` does not change the running coordinator;
+restart mdiff to apply it.
+
 ## Comparison and visual alignment
 
 Comparison operates on immutable snapshots of both buffers. Every content
