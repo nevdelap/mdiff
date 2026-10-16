@@ -2,17 +2,29 @@ package prototype
 
 import (
 	"fmt"
-	"strings"
 
+	"github.com/kballard/go-shellquote"
 	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/config"
+	"github.com/nevdelap/mdiff/internal/micro/display"
 	"github.com/nevdelap/mdiff/internal/micro/shell"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
 // routeMicroAction keeps Micro's configured bindings while adapting actions
 // that must operate on mdiff's two buffers or shared viewport.
-func (a *App) routeMicroAction(name string, h *action.BufPane) bool {
+func (a *App) routeMicroAction(name string, h *action.BufPane) (bool, bool) {
+	switch name {
+	case "DiffPrevious", "DiffNext", "ScrollUp", "ScrollDown", "PageUp", "PageDown", "HalfPageUp", "HalfPageDown", "Start", "End", "Center":
+	default:
+		a.diffNavValid = false
+	}
+	if a.helpVisible && h == a.helpPane {
+		return a.routeHelpAction(name, h)
+	}
+	if h != a.left.h && h != a.right.h {
+		return false, false
+	}
 	switch name {
 	case "Save":
 		h.SaveWithExternalChangeCheck("Save", nil)
@@ -44,8 +56,10 @@ func (a *App) routeMicroAction(name string, h *action.BufPane) bool {
 		a.focus = 1
 		a.setFocus()
 		a.ensureCursorVisible()
-	case "Quit", "QuitAll":
+	case "Quit":
 		a.requestQuit()
+	case "QuitAll":
+		a.requestQuitAll()
 	case "ForceQuit":
 		a.quitComplete = true
 	case "CommandMode":
@@ -56,9 +70,36 @@ func (a *App) routeMicroAction(name string, h *action.BufPane) bool {
 		config.GlobalSettings["keymenu"] = !config.GetGlobalOption("keymenu").(bool)
 		a.resize(a.cols, a.terminalHeight())
 	case "DiffPrevious":
-		a.jumpDiff(-1)
+		return true, a.jumpDiff(-1)
 	case "DiffNext":
-		a.jumpDiff(1)
+		return true, a.jumpDiff(1)
+	case "CursorPageUp", "CursorPageDown", "SelectPageUp", "SelectPageDown":
+		p := &a.left
+		if h == a.right.h {
+			p = &a.right
+		}
+		side := viewport.Left
+		if p == &a.right {
+			side = viewport.Right
+		}
+		a.syncPaneStartToSharedTop(p, side)
+		switch name {
+		case "CursorPageUp":
+			h.CursorPageUp()
+		case "CursorPageDown":
+			h.CursorPageDown()
+		case "SelectPageUp":
+			h.SelectPageUp()
+		case "SelectPageDown":
+			h.SelectPageDown()
+		}
+		start := p.view.StartLine
+		if row := a.layout.CursorRow(side, start.Line, start.Row); row >= 0 {
+			a.top = row
+			a.clampTop()
+		}
+		a.preserveViewport = true
+		a.ensureCursorVisible()
 	case "ScrollUp":
 		a.top -= microIntSetting(h, "scrollspeed")
 		a.clampTop()
@@ -102,9 +143,65 @@ func (a *App) routeMicroAction(name string, h *action.BufPane) bool {
 		}
 		a.preserveViewport = true
 	default:
-		return false
+		return false, false
 	}
-	return true
+	return true, true
+}
+
+func (a *App) routeHelpAction(name string, h *action.BufPane) (bool, bool) {
+	closeHelp := a.closeHelpOverlay
+	switch name {
+	case "Quit", "ForceQuit", "ToggleHelp":
+		closeHelp()
+	case "QuitAll":
+		a.requestQuitAll()
+	case "Save", "SaveAs":
+		action.InfoBar.Error("Cannot save readonly help buffer")
+	case "SaveAll":
+		a.saveAll(0)
+	case "OpenFile":
+		closeHelp()
+		a.focusedPane().h.OpenFile()
+	case "AddTab":
+		closeHelp()
+		a.newFocusedDocument()
+	case "PreviousTab", "NextTab", "FirstTab", "LastTab", "VSplit", "HSplit":
+		action.InfoBar.Error("Command unavailable in mdiff: " + name)
+	case "PreviousSplit", "NextSplit":
+		closeHelp()
+		a.focus = 1 - a.focus
+		a.setFocus()
+	case "FirstSplit":
+		closeHelp()
+		a.focus = viewport.Left
+		a.setFocus()
+	case "LastSplit":
+		closeHelp()
+		a.focus = viewport.Right
+		a.setFocus()
+	case "ToggleKeyMenu":
+		config.GlobalSettings["keymenu"] = !config.GetGlobalOption("keymenu").(bool)
+		a.resize(a.cols, a.terminalHeight())
+	case "CommandMode":
+		a.openCommandBarFor(h)
+	default:
+		return false, false
+	}
+	return true, true
+}
+
+func (a *App) syncPaneStartToSharedTop(p *pane, side viewport.Side) {
+	if len(a.layout.Rows) == 0 {
+		return
+	}
+	row := min(max(a.top, 0), len(a.layout.Rows)-1)
+	cell := a.layout.CellAt(side, row)
+	if cell.Line < 0 || cell.Spacer {
+		cell, _ = a.nearestCell(side, row)
+	}
+	if cell.Line >= 0 {
+		p.view.StartLine = display.SLoc{Line: cell.Line, Row: cell.WrapRow}
+	}
 }
 
 func (a *App) runInteractiveShell(input string, wait, getOutput bool) (string, error) {
@@ -151,19 +248,42 @@ func (a *App) saveAll(index int) {
 		return
 	}
 	p := panes[index]
-	if !p.buf.Modified() {
-		a.saveAll(index + 1)
-		return
-	}
-	p.h.SaveWithExternalChangeCheck("SaveAll", func() { a.saveAll(index + 1) })
+	_ = p.buf.Save()
+	a.saveAll(index + 1)
 }
 
 func (a *App) runMicroCommand(h *action.BufPane, input string) {
-	fields := strings.Fields(input)
+	fields, err := shellquote.Split(input)
+	if err != nil {
+		action.InfoBar.Error("Error parsing args ", err)
+		return
+	}
 	if len(fields) == 0 {
 		return
 	}
-	command := strings.ToLower(fields[0])
+	command := fields[0]
+	if a.helpVisible && h == a.helpPane {
+		switch command {
+		case "quit", "q":
+			a.closeHelpOverlay()
+			return
+		case "quitall":
+			a.requestQuitAll()
+			return
+		case "save", "saveas":
+			action.InfoBar.Error("Cannot save readonly help buffer")
+			return
+		case "open":
+			a.closeHelpOverlay()
+			a.focusedPane().h.HandleParsedCommand(input, fields)
+			a.syncChangedBuffers()
+			return
+		}
+	}
+	if !action.IsRegisteredCommand(command) {
+		h.HandleParsedCommand(input, fields)
+		return
+	}
 	if !safeCommand(command) {
 		action.InfoBar.Error("Command unavailable in mdiff: " + command)
 		return
@@ -178,18 +298,10 @@ func (a *App) runMicroCommand(h *action.BufPane, input string) {
 			return
 		}
 	case "help":
-		if len(fields) > 2 {
-			action.InfoBar.Error("Usage: help [topic]")
-			return
-		}
-		topic := "help"
-		if len(fields) == 2 {
-			topic = fields[1]
-		}
-		a.openHelpTopic(topic)
+		a.openHelpTopics(fields[1:])
 		return
 	}
-	h.HandleCommand(input)
+	h.HandleParsedCommand(input, fields)
 	a.syncChangedBuffers()
 	if command == "set" || command == "toggle" || command == "reset" {
 		a.resize(a.cols, a.terminalHeight())

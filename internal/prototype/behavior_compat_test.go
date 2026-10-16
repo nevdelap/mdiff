@@ -2,6 +2,7 @@ package prototype
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -152,187 +153,141 @@ func TestRawAndMouseQuitExitEventLoop(t *testing.T) {
 	}
 }
 
-func TestMicroHelpTopicsUseOverlayWithoutReplacingBuffers(t *testing.T) {
+func TestMicroHelpUsesBundledBufferMultipleTopicsAndBindings(t *testing.T) {
 	app, sim := newEditingTestApp(t, 68, 12)
 	defer app.Close()
 	left, right := app.left.buf, app.right.buf
-	app.runMicroCommand(app.left.h, "help commands")
-	if !app.helpVisible || app.helpTopic != "commands" || !strings.Contains(app.helpText, "# Commands") {
-		t.Fatalf("Micro help topic missing: visible=%t topic=%q", app.helpVisible, app.helpTopic)
+	app.runMicroCommand(app.left.h, "help commands options -vsplit")
+	if !app.helpVisible || app.helpBuf == nil || app.helpBuf.Type != buffer.BTHelp ||
+		!strings.Contains(app.helpText, "# commands") || !strings.Contains(app.helpText, "# options") {
+		t.Fatalf("help pages did not use combined Micro help buffer: visible=%t topic=%q", app.helpVisible, app.helpTopic)
 	}
 	app.draw()
-	if got := screenLine(sim, 0, 68); !strings.Contains(got, "Micro help: commands") {
-		t.Fatalf("help title missing from render: %q", got)
+	if got := screenLine(sim, 0, 68); !strings.Contains(got, "commands") {
+		t.Fatalf("Micro help buffer was not rendered: %q", got)
 	}
-	app.handle(key(tcell.KeyPgDn, 0, tcell.ModNone))
-	if app.helpTop == 0 {
-		t.Fatal("help did not scroll")
-	}
-	app.handle(key(tcell.KeyRight, 0, tcell.ModNone))
-	if app.helpTopic == "commands" || app.helpTop != 0 {
-		t.Fatalf("help topic navigation failed: topic=%q top=%d", app.helpTopic, app.helpTop)
-	}
-	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
-	if app.helpVisible || app.left.buf != left || app.right.buf != right || len(action.Tabs.List) != 1 {
-		t.Fatal("closing help changed two-pane editor layout")
-	}
-}
-
-func TestMicroHelpFindAndRepeatKeepsOverlay(t *testing.T) {
-	app, sim := newEditingTestApp(t, 68, 12)
-	defer app.Close()
-	left, right := app.left.buf, app.right.buf
-	app.runMicroCommand(app.left.h, "help commands")
-	app.handle(key(tcell.KeyCtrlF, 0, tcell.ModCtrl))
+	action.BindKey("F7", "Find", action.BufMapEvent)
+	app.handle(key(tcell.KeyF7, 0, tcell.ModNone))
 	if !action.InfoBar.HasPrompt || !app.helpVisible {
-		t.Fatal("Ctrl+F did not open help search")
+		t.Fatal("configured Micro Find action did not open its normal prompt in help")
 	}
 	for _, r := range "command" {
 		app.handle(key(tcell.KeyRune, r, tcell.ModNone))
 	}
 	app.handle(key(tcell.KeyEnter, 0, tcell.ModNone))
-	matches := app.helpMatches()
-	if !app.helpVisible || len(matches) < 2 || app.helpMatch < 0 || app.helpTop != matches[app.helpMatch].first {
-		t.Fatalf("help search did not select a match: query=%q matches=%v selected=%d top=%d", app.helpQuery, matches, app.helpMatch, app.helpTop)
+	if app.helpBuf.LastSearch != "command" || !app.helpPane.Cursor.HasSelection() {
+		t.Fatalf("Micro Find did not search/select help text: query=%q selection=%t", app.helpBuf.LastSearch, app.helpPane.Cursor.HasSelection())
 	}
-	first := app.helpMatch
-	app.draw()
-	_, _, attrs := cellStyle(sim, 0, 1)
-	if attrs&tcell.AttrReverse == 0 {
-		t.Fatal("selected help match is not highlighted")
+	firstMatch := app.helpPane.Cursor.Loc
+	action.BindKey("F8", "FindNext", action.BufMapEvent)
+	app.handle(key(tcell.KeyF8, 0, tcell.ModNone))
+	if app.helpPane.Cursor.Loc == firstMatch {
+		t.Fatal("configured FindNext did not advance in help text")
 	}
-	app.handle(key(tcell.KeyRune, 'n', tcell.ModNone))
-	if app.helpMatch == first || app.helpTop != matches[app.helpMatch].first {
-		t.Fatal("next help match did not move the viewport")
+	app.handle(key(tcell.KeyCtrlG, 0, tcell.ModCtrl))
+	if app.helpVisible || app.left.buf != left || app.right.buf != right || len(action.Tabs.List) != 1 {
+		t.Fatal("closing help changed the paired editor")
 	}
-	app.handle(key(tcell.KeyRune, 'N', tcell.ModNone))
-	if app.helpMatch != first || app.left.buf != left || app.right.buf != right {
-		t.Fatal("previous help match or editor buffer ownership changed")
+}
+
+func TestMicroHelpSingleTopicPreservesBytesAndEscBinding(t *testing.T) {
+	app, _ := newEditingTestApp(t, 68, 12)
+	defer app.Close()
+	file := config.FindRuntimeFile(config.RTHelp, "commands")
+	if file == nil {
+		t.Fatal("bundled commands help page not found")
 	}
+	want, err := file.Data()
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.runMicroCommand(app.left.h, "help commands")
+	if got := app.helpBuf.Bytes(); string(got) != string(want) {
+		t.Fatalf("single-topic help changed bundled page bytes: got prefix %q, want prefix %q", got[:min(len(got), 40)], want[:min(len(want), 40)])
+	}
+	action.BindKey("Esc", "CursorEnd", action.BufMapEvent)
+	app.helpPane.Cursor.GotoLoc(buffer.Loc{})
 	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
-	if app.helpVisible {
-		t.Fatal("Escape did not close help")
+	if !app.helpVisible || app.helpPane.Cursor.Loc != app.helpBuf.End() {
+		t.Fatalf("configured Esc binding was intercepted: visible=%t cursor=%v", app.helpVisible, app.helpPane.Cursor.Loc)
 	}
 }
 
-func TestHelpSearchPromptShowsCursorUntilClosed(t *testing.T) {
-	app, sim := newEditingTestApp(t, 40, 10)
+func TestHelpOverlayContainsQuitPasteAndRawActions(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
 	defer app.Close()
-	app.openHelpTopic("help")
-	app.handle(key(tcell.KeyCtrlF, 0, tcell.ModCtrl))
-	app.handle(key(tcell.KeyRune, '猫', tcell.ModNone))
-	app.draw()
-	if x, y, visible := sim.GetCursor(); !visible || y != app.statusRow || x != len("Find help (regex): ")+2 {
-		t.Fatalf("help search cursor = (%d,%d) visible=%t", x, y, visible)
+	app.left.buf.Insert(buffer.Loc{}, "left document")
+	app.right.buf.Insert(buffer.Loc{}, "right document")
+	leftBefore, rightBefore := string(app.left.buf.Bytes()), string(app.right.buf.Bytes())
+	action.BindKey("F10", "ToggleHelp", action.BufMapEvent)
+	app.runMicroCommand(app.left.h, "help commands")
+	helpBefore := string(app.helpBuf.Bytes())
+	app.handle(tcell.NewEventPaste("pasted text", ""))
+	if string(app.left.buf.Bytes()) != leftBefore || string(app.right.buf.Bytes()) != rightBefore || string(app.helpBuf.Bytes()) != helpBefore {
+		t.Fatal("paste in help modified a hidden document or read-only help text")
 	}
-	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
-	app.draw()
-	if !app.helpVisible || action.InfoBar.HasPrompt {
-		t.Fatal("closing help search also closed the help overlay")
+	const raw = "\x1b[?43~"
+	action.BindKey(raw, "CursorEnd", action.BufMapEvent)
+	app.helpPane.Cursor.GotoLoc(buffer.Loc{})
+	app.handle(tcell.NewEventRaw(raw))
+	if app.helpPane.Cursor.Loc != app.helpBuf.End() {
+		t.Fatalf("raw help binding left cursor at %v", app.helpPane.Cursor.Loc)
 	}
-	if _, _, visible := sim.GetCursor(); visible {
-		t.Fatal("editor cursor visible over help after search prompt closed")
-	}
-}
-
-func TestUnicodeHelpWrapAndMatchRowsFollowVisualColumns(t *testing.T) {
-	app, sim := newEditingTestApp(t, 8, 8)
-	defer app.Close()
-	app.openHelpTopic("help")
-	app.helpText = "aaaaaa猫e\u0301X"
-	if got := app.helpLines(); !reflect.DeepEqual(got, []string{"aaaaaa猫", "e\u0301X"}) {
-		t.Fatalf("Unicode help rows = %#v", got)
-	}
-	app.findHelp("猫e\u0301")
-	if got := app.helpMatches(); len(got) != 1 || got[0] != (helpMatchPosition{first: 0, last: 1}) {
-		t.Fatalf("Unicode help match rows = %+v", got)
-	}
-	app.draw()
-	for _, row := range []int{1, 2} {
-		_, _, attrs := cellStyle(sim, 0, row)
-		if attrs&tcell.AttrReverse == 0 {
-			t.Fatalf("Unicode match row %d not highlighted", row)
+	for _, event := range []*tcell.EventKey{key(tcell.KeyCtrlG, 0, tcell.ModCtrl), key(tcell.KeyCtrlQ, 0, tcell.ModCtrl)} {
+		app.helpVisible = true
+		app.handle(event)
+		if app.helpVisible || app.quitComplete || len(action.Tabs.List) != 1 || len(action.Tabs.List[0].Panes) != 2 ||
+			app.left.buf != app.left.h.Buf || app.right.buf != app.right.h.Buf {
+			t.Fatalf("help close action %v changed the fixed tab or quit mdiff", event)
 		}
 	}
-	r, marks, _, _ := sim.GetContent(0, 2)
-	if r != 'e' || !reflect.DeepEqual(marks, []rune{'\u0301'}) {
-		t.Fatalf("combined character split or lost: %q + %q", r, string(marks))
+	app.helpVisible = true
+	app.runMicroCommand(app.helpPane, "help commands -vsplit -hsplit")
+	if !strings.Contains(app.currentStatus(), "hsplit and vsplit are not allowed at the same time") {
+		t.Fatalf("conflicting help split flags did not preserve Micro's error: %q", app.currentStatus())
 	}
 }
 
-func TestHelpSearchHighlightsEveryRowOfWrappedTab(t *testing.T) {
-	app, sim := newEditingTestApp(t, 3, 8)
-	defer app.Close()
-	app.openHelpTopic("help")
-	app.helpText = "\tX"
-	if got := app.helpLines(); !reflect.DeepEqual(got, []string{"   ", " X"}) {
-		t.Fatalf("wrapped tab rows = %#v", got)
+func TestQuitAllFromHelpExitsEventLoopForKeyMouseAndRaw(t *testing.T) {
+	const raw = "\x1b[?44~"
+	for _, tc := range []struct {
+		name    string
+		binding string
+		event   func(*App) tcell.Event
+	}{
+		{"key", "F11", func(_ *App) tcell.Event { return key(tcell.KeyF11, 0, tcell.ModNone) }},
+		{"mouse", "MouseRight", func(_ *App) tcell.Event {
+			return tcell.NewEventMouse(2, 0, tcell.ButtonSecondary, tcell.ModNone, "")
+		}},
+		{"raw", raw, func(_ *App) tcell.Event { return tcell.NewEventRaw(raw) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _ := newEditingTestApp(t, 60, 12)
+			defer app.Close()
+			action.BindKey(tc.binding, "QuitAll", action.BufMapEvent)
+			app.runMicroCommand(app.left.h, "help commands")
+			events := make(chan tcell.Event, 1)
+			events <- tc.event(app)
+			close(events)
+			if err := RunWithSignals(context.Background(), app, events); err != nil || !app.quitComplete {
+				t.Fatalf("clean QuitAll from help did not exit event loop: err=%v complete=%t", err, app.quitComplete)
+			}
+		})
 	}
-	app.findHelp(`\t`)
-	if got := app.helpMatches(); len(got) != 1 || got[0] != (helpMatchPosition{first: 0, last: 1}) {
-		t.Fatalf("wrapped tab match rows = %+v", got)
-	}
-	app.draw()
-	for _, y := range []int{1, 2} {
-		_, _, attrs := cellStyle(sim, 0, y)
-		if attrs&tcell.AttrReverse == 0 {
-			t.Fatalf("tab's display row %d was not highlighted", y)
+	t.Run("dirty-confirmation", func(t *testing.T) {
+		app, _ := newEditingTestApp(t, 60, 12)
+		defer app.Close()
+		app.left.buf.Insert(buffer.Loc{}, "dirty")
+		action.BindKey("F11", "QuitAll", action.BufMapEvent)
+		app.runMicroCommand(app.left.h, "help commands")
+		events := make(chan tcell.Event, 2)
+		events <- key(tcell.KeyF11, 0, tcell.ModNone)
+		events <- key(tcell.KeyRune, 'y', tcell.ModNone)
+		close(events)
+		if err := RunWithSignals(context.Background(), app, events); err != nil || !app.quitComplete {
+			t.Fatalf("confirmed dirty QuitAll from help did not exit event loop: err=%v complete=%t", err, app.quitComplete)
 		}
-	}
-}
-
-func TestMicroHelpFindCrossesVisualWrap(t *testing.T) {
-	app, sim := newEditingTestApp(t, 12, 8)
-	defer app.Close()
-	app.openHelpTopic("help")
-	app.helpText = "before longneedle after"
-	app.handle(key(tcell.KeyCtrlF, 0, tcell.ModCtrl))
-	for _, r := range "longneedle" {
-		app.handle(key(tcell.KeyRune, r, tcell.ModNone))
-	}
-	app.handle(key(tcell.KeyEnter, 0, tcell.ModNone))
-	matches := app.helpMatches()
-	if len(matches) != 1 || matches[0] != (helpMatchPosition{first: 0, last: 1}) || app.helpMatch != 0 {
-		t.Fatalf("wrapped source match mapped incorrectly: %+v selected=%d", matches, app.helpMatch)
-	}
-	app.draw()
-	for _, row := range []int{1, 2} {
-		_, _, attrs := cellStyle(sim, 0, row)
-		if attrs&tcell.AttrReverse == 0 {
-			t.Fatalf("wrapped match row %d was not highlighted", row)
-		}
-	}
-	if !app.helpVisible || action.InfoBar.HasError {
-		t.Fatal("wrapped help search unexpectedly closed or reported no match")
-	}
-}
-
-func TestMicroHelpFindUsesRegexAndIgnorecaseSetting(t *testing.T) {
-	app, _ := newEditingTestApp(t, 40, 10)
-	defer app.Close()
-	app.openHelpTopic("help")
-	app.helpText = "axb"
-	app.findHelp("a.b")
-	if got := app.helpMatches(); len(got) != 1 || app.helpMatch != 0 {
-		t.Fatalf("regex Find did not match axb: %+v selected=%d", got, app.helpMatch)
-	}
-	app.runMicroCommand(app.left.h, "set ignorecase false")
-	if config.GetGlobalOption("ignorecase") != false {
-		t.Fatal("Micro ignorecase setting was not disabled")
-	}
-	app.helpText = "Alpha"
-	app.findHelp("alpha")
-	if app.helpMatch != -1 || len(app.helpMatches()) != 0 {
-		t.Fatal("case-sensitive help search matched different case")
-	}
-	app.findHelp("Alpha")
-	if app.helpMatch != 0 || len(app.helpMatches()) != 1 {
-		t.Fatal("case-sensitive help search missed exact case")
-	}
-	app.findHelp("[")
-	if !action.InfoBar.HasError || app.helpQuery != "Alpha" || app.helpMatch != 0 {
-		t.Fatal("invalid regex did not report an error and preserve the previous search")
-	}
+	})
 }
 
 func TestMicroMovementAndRemapsReachFocusedPane(t *testing.T) {
@@ -459,6 +414,238 @@ func TestAlternateQuitAndRemappedSaveAll(t *testing.T) {
 	}
 	if !app.handle(key(tcell.KeyF4, 0, tcell.ModNone)) {
 		t.Fatal("Micro F4 quit did not complete clean two-pane workflow")
+	}
+}
+
+func TestSaveAllMatchesMicroForUntitledAndExternallyChangedFiles(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "untitled")
+	app.right.buf.Insert(buffer.Loc{}, "also untitled")
+	action.BindKey("F8", "SaveAll", action.BufMapEvent)
+	app.handle(key(tcell.KeyF8, 0, tcell.ModNone))
+	if action.InfoBar.HasPrompt || !app.left.buf.Modified() || !app.right.buf.Modified() {
+		t.Fatal("SaveAll prompted for untitled buffers instead of using Buffer.Save semantics")
+	}
+	app.Close()
+	left, right := filepath.Join(t.TempDir(), "left"), filepath.Join(t.TempDir(), "right")
+	for _, path := range []string{left, right} {
+		if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	app = newWorkflowAppWithConfig(t, t.TempDir(), left, right)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "L")
+	app.right.buf.Insert(buffer.Loc{}, "R")
+	if err := os.WriteFile(right, []byte("external"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.handle(key(tcell.KeyF8, 0, tcell.ModNone))
+	if action.InfoBar.HasPrompt {
+		t.Fatal("SaveAll added an external-change confirmation absent from Micro's SaveAll")
+	}
+}
+
+func TestBoundQuitAllConfirmsOnceAndDiscardsBothBuffers(t *testing.T) {
+	for _, dirty := range []string{"left", "right", "both"} {
+		t.Run(dirty, func(t *testing.T) {
+			app, _ := newEditingTestApp(t, 60, 12)
+			defer app.Close()
+			if dirty == "left" || dirty == "both" {
+				app.left.buf.Insert(buffer.Loc{}, "L")
+			}
+			if dirty == "right" || dirty == "both" {
+				app.right.buf.Insert(buffer.Loc{}, "R")
+			}
+			action.BindKey("F10", "QuitAll", action.BufMapEvent)
+			app.handle(key(tcell.KeyF10, 0, tcell.ModNone))
+			if !action.InfoBar.HasPrompt || !strings.Contains(action.InfoBar.Msg, "without saving") {
+				t.Fatalf("QuitAll prompt = %q; want one discard confirmation", action.InfoBar.Msg)
+			}
+			app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
+			if app.quitComplete || !app.left.buf.Modified() && dirty != "right" || !app.right.buf.Modified() && dirty != "left" {
+				t.Fatal("canceling QuitAll discarded data or quit")
+			}
+		})
+	}
+}
+
+func TestBoundQuitAllYesDiscardsDirtyPanesWithoutSaving(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "left")
+	app.right.buf.Insert(buffer.Loc{}, "right")
+	action.BindKey("F10", "QuitAll", action.BufMapEvent)
+	app.handle(key(tcell.KeyF10, 0, tcell.ModNone))
+	app.handle(key(tcell.KeyRune, 'y', tcell.ModNone))
+	if !app.quitComplete || !app.left.buf.Modified() || !app.right.buf.Modified() {
+		t.Fatal("QuitAll confirmation did not quit while retaining unsaved buffers")
+	}
+}
+
+func TestCommandBridgePreservesMicroQuotingAndCase(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	var got []string
+	action.MakeCommand("MyCommand", func(_ *action.BufPane, args []string) { got = args }, nil)
+	app.runMicroCommand(app.left.h, `"MyCommand" 'argument with spaces'`)
+	if !reflect.DeepEqual(got, []string{"argument with spaces"}) {
+		t.Fatalf("parsed command args = %#v", got)
+	}
+	app.runMicroCommand(app.left.h, `"help" commands options`)
+	if !app.helpVisible || !strings.Contains(app.helpText, "# commands") || !strings.Contains(app.helpText, "# options") {
+		t.Fatal("quoted command or multiple help topics were rejected")
+	}
+	app.runMicroCommand(app.left.h, `help 'unterminated`)
+	if !strings.Contains(app.currentStatus(), "Error parsing args") {
+		t.Fatalf("malformed quote error = %q", app.currentStatus())
+	}
+}
+
+func TestDefaultDiffKeysFallBackWhenThereAreNoDifferences(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "same\ntext")
+	app.right.buf.Insert(buffer.Loc{}, "same\ntext")
+	app.rebuildWithAnchor(anchor{})
+	app.left.h.GotoLoc(buffer.Loc{X: 4, Y: 1})
+	app.handle(key(tcell.KeyRune, '[', tcell.ModAlt))
+	if app.left.h.Cursor.Loc != (buffer.Loc{X: 0, Y: 0}) {
+		t.Fatalf("DiffPrevious fallback cursor = %v", app.left.h.Cursor.Loc)
+	}
+}
+
+func TestMouseWheelBindingTargetsPaneUnderPointerWithoutChangingFocus(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "left\nlast")
+	app.right.buf.Insert(buffer.Loc{}, "right\nlast")
+	app.left.h.GotoLoc(buffer.Loc{})
+	app.right.h.GotoLoc(buffer.Loc{})
+	app.focus = viewport.Left
+	app.setFocus()
+	action.BindKey("MouseWheelDown", "CursorEnd", action.BufMapEvent)
+	x := app.left.width + 2
+	app.handle(tcell.NewEventMouse(x, 1, tcell.WheelDown, tcell.ModNone, ""))
+	if app.focus != viewport.Left || app.right.h.Cursor.Y != app.right.buf.LinesNum()-1 || app.left.h.Cursor.Y == app.left.buf.LinesNum()-1 {
+		t.Fatalf("wheel target/focus = right cursor %v, left cursor %v, focus %v", app.right.h.Cursor.Loc, app.left.h.Cursor.Loc, app.focus)
+	}
+}
+
+func TestMouseWheelOutsidePaneBoundsFallsBackToFocusedPane(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "left\nlast")
+	app.right.buf.Insert(buffer.Loc{}, "right\nlast")
+	app.left.h.GotoLoc(buffer.Loc{})
+	app.right.h.GotoLoc(buffer.Loc{})
+	app.focus = viewport.Left
+	app.setFocus()
+	action.BindKey("MouseWheelDown", "CursorEnd", action.BufMapEvent)
+	cases := []struct {
+		name string
+		x, y int
+	}{
+		{"divider", app.left.x + app.left.width, 1},
+		{"footer", app.right.x + 1, app.rows},
+		{"outside", -1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app.left.h.GotoLoc(buffer.Loc{})
+			app.right.h.GotoLoc(buffer.Loc{})
+			app.handle(tcell.NewEventMouse(tc.x, tc.y, tcell.WheelDown, tcell.ModNone, ""))
+			if app.left.h.Cursor.Y != app.left.buf.LinesNum()-1 || app.right.h.Cursor.Y != 0 || app.focus != viewport.Left {
+				t.Fatalf("wheel fallback moved left=%v right=%v focus=%v", app.left.h.Cursor.Loc, app.right.h.Cursor.Loc, app.focus)
+			}
+		})
+	}
+}
+
+func TestPageActionsMoveCursorAndSharedViewportTogether(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	var lines strings.Builder
+	for i := 0; i < 80; i++ {
+		fmt.Fprintf(&lines, "line %02d\n", i)
+	}
+	app.left.buf.Insert(buffer.Loc{}, lines.String())
+	app.right.buf.Insert(buffer.Loc{}, lines.String())
+	app.rebuildWithAnchor(anchor{})
+	app.left.h.GotoLoc(buffer.Loc{X: 0, Y: 20})
+	app.ensureCursorVisible()
+	before := app.left.h.Cursor.Y
+	app.handle(key(tcell.KeyPgDn, 0, tcell.ModNone))
+	if app.left.h.Cursor.Y <= before || app.top == 0 {
+		t.Fatalf("PageDown cursor/top = %d/%d from %d", app.left.h.Cursor.Y, app.top, before)
+	}
+	afterDown := app.left.h.Cursor.Y
+	app.handle(key(tcell.KeyPgUp, 0, tcell.ModNone))
+	if app.left.h.Cursor.Y >= afterDown {
+		t.Fatalf("PageUp cursor = %d after PageDown %d", app.left.h.Cursor.Y, afterDown)
+	}
+}
+
+func TestPageActionAfterSharedWheelScrollPreservesCursorScreenRow(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	content := strings.Repeat("line\n", 80)
+	app.left.buf.Insert(buffer.Loc{}, content)
+	app.right.buf.Insert(buffer.Loc{}, content)
+	app.left.buf.Settings["scrollspeed"] = float64(1)
+	app.right.buf.Settings["scrollspeed"] = float64(1)
+	app.rebuildWithAnchor(anchor{})
+	app.left.h.GotoLoc(buffer.Loc{Y: 20})
+	app.top = 15
+	app.routeMicroAction("ScrollDown", app.left.h)
+	beforeRow := app.layout.CursorRow(viewport.Left, app.left.h.Cursor.Y, app.left.view.VLocFromLoc(app.left.h.Cursor.Loc).Row) - app.top
+	if beforeRow < 0 || beforeRow >= app.rows {
+		t.Fatalf("shared scroll left cursor outside viewport at row %d (top=%d cursor=%d rows=%d)", beforeRow, app.top, app.left.h.Cursor.Y, app.rows)
+	}
+	if app.left.view.StartLine.Line == app.top {
+		t.Fatal("test did not leave Micro's private view stale after shared scrolling")
+	}
+	app.handle(key(tcell.KeyPgDn, 0, tcell.ModNone))
+	afterRow := app.layout.CursorRow(viewport.Left, app.left.h.Cursor.Y, app.left.view.VLocFromLoc(app.left.h.Cursor.Loc).Row) - app.top
+	startRow := app.layout.CursorRow(viewport.Left, app.left.view.StartLine.Line, app.left.view.StartLine.Row)
+	microRow := app.left.h.Cursor.Y - app.left.view.StartLine.Line
+	if startRow != app.top || afterRow != microRow {
+		t.Fatalf("PageDown shared position differs from Micro's view: cursor row=%d Micro row=%d top=%d Micro top=%d (previous cursor row=%d)", afterRow, microRow, app.top, startRow, beforeRow)
+	}
+}
+
+func TestSelectionPageActionTracksWrappedAlignedRowsOnRightPane(t *testing.T) {
+	app, _ := newEditingTestApp(t, 40, 10)
+	defer app.Close()
+	var left, right strings.Builder
+	for i := 0; i < 40; i++ {
+		line := fmt.Sprintf("line %02d with a long wrapped tail that continues", i)
+		fmt.Fprintln(&left, line)
+		if i == 4 {
+			fmt.Fprintln(&right, "right-only inserted row")
+		}
+		fmt.Fprintln(&right, line)
+	}
+	for _, p := range app.panes() {
+		p.buf.Settings["softwrap"] = true
+	}
+	app.left.buf.Insert(buffer.Loc{}, left.String())
+	app.right.buf.Insert(buffer.Loc{}, right.String())
+	app.rebuildWithAnchor(anchor{})
+	app.focus = viewport.Right
+	app.setFocus()
+	app.right.h.GotoLoc(buffer.Loc{X: 0, Y: 18})
+	app.ensureCursorVisible()
+	app.handle(key(tcell.KeyPgDn, 0, tcell.ModShift))
+	if !app.right.h.Cursor.HasSelection() || app.top == 0 {
+		t.Fatalf("ShiftPageDown selection/viewport = %t/%d", app.right.h.Cursor.HasSelection(), app.top)
+	}
+	loc := app.right.h.Cursor.Loc
+	visual := app.right.view.VLocFromLoc(loc)
+	row := app.layout.CursorRow(viewport.Right, loc.Y, visual.Row)
+	if row < app.top || row >= app.top+app.rows {
+		t.Fatalf("selected cursor row %d is outside shared viewport [%d,%d)", row, app.top, app.top+app.rows)
 	}
 }
 

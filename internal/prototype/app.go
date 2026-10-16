@@ -84,6 +84,14 @@ type App struct {
 	diffWarning      string
 	handlingPaste    bool
 	blockedSequence  string
+	diffNavValid     bool
+	diffNavHunk      int
+	diffNavCursor    buffer.Loc
+	diffNavSide      viewport.Side
+	diffNavVersions  DiffVersions
+	diffNavLayout    appLayoutKey
+	diffNavLeftBuf   *buffer.Buffer
+	diffNavRightBuf  *buffer.Buffer
 	quitFlow         *quitFlow
 	quitComplete     bool
 	diagnostic       string
@@ -95,9 +103,11 @@ type App struct {
 	helpVisible      bool
 	helpTopic        string
 	helpText         string
-	helpTop          int
-	helpQuery        string
-	helpMatch        int
+	helpBuf          *buffer.Buffer
+	helpWindow       *display.BufWindow
+	helpPane         *action.BufPane
+	helpTabSlot      int
+	helpTabOriginal  action.Pane
 	handoff          func(func() error) error
 	terminalErr      error
 }
@@ -217,7 +227,6 @@ func NewWithFiles(s tcell.Screen, configDir string, cliDebounceMS *int, paths ..
 		return nil, fmt.Errorf("open right pane: %w", err)
 	}
 	for _, b := range []*buffer.Buffer{leftBuf, rightBuf} {
-		b.Settings["scrollbar"] = false
 		b.Settings["diffgutter"] = false
 	}
 
@@ -476,6 +485,10 @@ func (a *App) Close() {
 	if a.right.buf != nil {
 		a.right.buf.Close()
 	}
+	if a.helpBuf != nil {
+		a.helpBuf.Close()
+		a.helpBuf = nil
+	}
 	if action.InfoBar != nil {
 		action.InfoBar.Close()
 		action.InfoBar = nil
@@ -696,14 +709,18 @@ func surroundingLines(lines []string, line, direction int) []string {
 }
 
 func (a *App) ensureCursorVisible() {
+	p, side := &a.left, viewport.Left
+	if a.focus == viewport.Right {
+		p, side = &a.right, viewport.Right
+	}
+	a.ensurePaneCursorVisible(p, side)
+}
+
+func (a *App) ensurePaneCursorVisible(p *pane, side viewport.Side) {
 	a.refreshLayoutIfNeeded()
 	if len(a.layout.Rows) == 0 || a.rows <= 0 {
 		a.top = 0
 		return
-	}
-	p, side := &a.left, viewport.Left
-	if a.focus == viewport.Right {
-		p, side = &a.right, viewport.Right
 	}
 	loc := p.h.Cursor.Loc
 	p.view.Relocate()
@@ -711,6 +728,15 @@ func (a *App) ensureCursorVisible() {
 	row := a.layout.CursorRow(side, loc.Y, wrapRow)
 	if row < 0 {
 		return
+	}
+	// GotoLoc positions distant jumps using Micro's quarter-window rule. Map
+	// that private start line into the shared aligned rows before applying the
+	// ordinary cursor visibility clamp.
+	if row < a.top || row >= a.top+a.rows {
+		start := p.view.StartLine
+		if requested := a.layout.CursorRow(side, start.Line, start.Row); requested >= 0 {
+			a.top = requested
+		}
 	}
 	if row < a.top {
 		a.top = row
@@ -773,8 +799,10 @@ func (a *App) handle(event tcell.Event) bool {
 		return a.quitComplete
 	case *tcell.EventRaw:
 		if a.helpVisible {
-			a.helpVisible = false
-			return false
+			if a.helpPane != nil {
+				a.helpPane.HandleEvent(e)
+			}
+			return a.quitComplete
 		}
 		a.blockedSequence = ""
 		if rejected := action.RejectedBufferBindingForRaw(e); rejected != "" {
@@ -788,6 +816,12 @@ func (a *App) handle(event tcell.Event) bool {
 		a.blockedSequence = ""
 		if action.InfoBar != nil && action.InfoBar.HasPrompt {
 			a.handlePromptEvent(e)
+			return a.quitComplete
+		}
+		if a.helpVisible {
+			if a.helpPane != nil {
+				a.helpPane.HandleEvent(e)
+			}
 			return a.quitComplete
 		}
 		p := a.focusedPane()
@@ -820,20 +854,22 @@ func (a *App) rejectConflictingReservedBinding(event *tcell.EventKey) bool {
 }
 
 func (a *App) openCommandBar() {
+	a.openCommandBarFor(a.focusedPane().h)
+}
+
+func (a *App) openCommandBarFor(pane *action.BufPane) {
 	if action.InfoBar == nil {
 		return
 	}
-	p := a.focusedPane()
 	action.InfoBar.Prompt("> ", "", "Command", nil, func(input string, canceled bool) {
 		if canceled || strings.TrimSpace(input) == "" {
 			return
 		}
-		a.runMicroCommand(p.h, input)
+		a.runMicroCommand(pane, input)
 	})
 }
 
 func safeCommand(command string) bool {
-	command = strings.ToLower(command)
 	if !action.IsRegisteredCommand(command) {
 		return false
 	}
@@ -842,6 +878,12 @@ func safeCommand(command string) bool {
 		return false
 	}
 	return true
+}
+
+func (a *App) rejectPluginReload() {
+	if action.InfoBar != nil {
+		action.InfoBar.Error("Command unavailable in mdiff: reload")
+	}
 }
 
 func (a *App) reportRejectedAction(binding string) {
@@ -1035,8 +1077,22 @@ func (a *App) setFocus() {
 func (a *App) handleMouse(e *tcell.EventMouse) {
 	x, y := e.Position()
 	if e.Buttons()&(tcell.WheelUp|tcell.WheelDown|tcell.WheelLeft|tcell.WheelRight) != 0 {
-		a.focusedPane().h.HandleEvent(e)
-		a.preserveViewport = false
+		p := a.focusedPane()
+		side := a.focus
+		if y >= a.left.view.Y && y < a.left.view.Y+a.left.view.Height {
+			if x >= a.left.view.X && x < a.left.view.X+a.left.view.Width {
+				p, side = &a.left, viewport.Left
+			}
+			if x >= a.right.view.X && x < a.right.view.X+a.right.view.Width {
+				p, side = &a.right, viewport.Right
+			}
+		}
+		p.h.HandleEvent(e)
+		if a.preserveViewport {
+			a.preserveViewport = false
+		} else {
+			a.ensurePaneCursorVisible(p, side)
+		}
 		return
 	}
 	if y >= a.rows && e.Buttons() != tcell.ButtonNone {
@@ -1114,9 +1170,10 @@ func (a *App) nearestCell(side viewport.Side, row int) (viewport.Cell, int) {
 	return viewport.Cell{Line: -1, Spacer: true}, row
 }
 
-func (a *App) jumpDiff(direction int) {
+func (a *App) jumpDiff(direction int) bool {
+	a.refreshLayoutIfNeeded()
 	if len(a.layout.Rows) == 0 {
-		return
+		return false
 	}
 	type hunk struct{ start, end int }
 	hunks := make([]hunk, 0)
@@ -1131,30 +1188,47 @@ func (a *App) jumpDiff(direction int) {
 		}
 		hunks = append(hunks, hunk{start: start, end: row})
 	}
+	pane, side := &a.left, viewport.Left
+	if a.focus == viewport.Right {
+		pane, side = &a.right, viewport.Right
+	}
+	cursor := pane.h.Cursor.Loc
+	cursorRow := a.layout.CursorRow(side, cursor.Y, pane.view.VLocFromLoc(cursor).Row)
+	if cursorRow < 0 {
+		cursorRow = a.top
+	}
 	selected := -1
-	if direction > 0 {
+	continuing := a.diffNavValid && a.diffNavCursor == cursor && a.diffNavSide == side &&
+		a.diffNavVersions == a.versions && a.diffNavLayout == a.layoutKey &&
+		a.diffNavLeftBuf == a.left.buf && a.diffNavRightBuf == a.right.buf
+	if continuing {
+		if direction > 0 {
+			selected = a.diffNavHunk + 1
+		} else {
+			selected = a.diffNavHunk - 1
+		}
+		if selected < 0 || selected >= len(hunks) {
+			selected = -1
+		}
+	} else if direction > 0 {
 		for i, current := range hunks {
-			if current.start > a.top {
+			if current.start > cursorRow {
 				selected = i
 				break
 			}
 		}
 	} else {
 		for i := len(hunks) - 1; i >= 0; i-- {
-			if hunks[i].end <= a.top {
+			if hunks[i].end <= cursorRow {
 				selected = i
 				break
 			}
 		}
 	}
 	if selected < 0 {
-		return
+		return false
 	}
 	target := hunks[selected]
-	pane, side := &a.left, viewport.Left
-	if a.focus == viewport.Right {
-		pane, side = &a.right, viewport.Right
-	}
 	line := -1
 	for row := target.start; row < target.end; row++ {
 		cell := a.layout.CellAt(side, row)
@@ -1182,7 +1256,16 @@ func (a *App) jumpDiff(direction int) {
 	if line >= 0 {
 		pane.h.GotoLoc(buffer.Loc{X: 0, Y: line})
 	}
+	a.diffNavValid = true
+	a.diffNavHunk = selected
+	a.diffNavCursor = pane.h.Cursor.Loc
+	a.diffNavSide = side
+	a.diffNavVersions = a.versions
+	a.diffNavLayout = a.layoutKey
+	a.diffNavLeftBuf = a.left.buf
+	a.diffNavRightBuf = a.right.buf
 	a.ensureCursorVisible()
+	return true
 }
 
 // RunWithSignals is useful to tests that need to exercise interruption without

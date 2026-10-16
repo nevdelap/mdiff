@@ -22,6 +22,9 @@ type BufWindow struct {
 	active bool
 	// SuppressCursor leaves active-line styling intact during offscreen composition.
 	SuppressCursor bool
+	// BackgroundPreserved reports source cells whose explicit Micro highlight
+	// background takes precedence over cursor-line and color-column styling.
+	BackgroundPreserved func(buffer.Loc, bool)
 
 	sline *StatusLine
 
@@ -684,6 +687,9 @@ func (w *BufWindow) displayBuffer() {
 				}
 			}
 
+			if w.BackgroundPreserved != nil {
+				w.BackgroundPreserved(bloc, preservebg)
+			}
 			screen.SetContent(w.X+vloc.X, w.Y+vloc.Y, r, combc, style)
 
 			if showcursor {

@@ -45,27 +45,10 @@ func (a *App) draw() {
 		screen.SetContent(a.left.width, y, marker, nil, style)
 	}
 	if a.helpVisible {
-		header := "Micro help: " + a.helpTopic + " | Ctrl+F find, n/N next/previous, arrows navigate, Esc close"
-		if a.helpQuery != "" {
-			header = "Micro help: " + a.helpTopic + " | Find: " + a.helpQuery
-		}
-		a.renderLine(0, header, microMenuStyle())
-		lines := a.helpLines()
-		matches := a.helpMatches()
-		a.helpTop = min(a.helpTop, max(0, len(lines)-max(1, a.rows-1)))
-		for y := 1; y < a.rows; y++ {
-			line := ""
-			if index := a.helpTop + y - 1; index < len(lines) {
-				line = lines[index]
-			}
-			style := microMenuStyle()
-			if a.helpMatch >= 0 && a.helpMatch < len(matches) {
-				match := matches[a.helpMatch]
-				if row := a.helpTop + y - 1; row >= match.first && row <= match.last {
-					style = style.Reverse(true)
-				}
-			}
-			a.renderLine(y, line, style)
+		if a.helpWindow != nil {
+			a.helpWindow.X, a.helpWindow.Y = 0, 0
+			a.helpWindow.Resize(a.cols, a.rows)
+			a.helpWindow.Display()
 		}
 	}
 	status := ""
@@ -105,9 +88,6 @@ func (a *App) draw() {
 		}
 	}
 	cursorX, cursorY, cursorVisible := a.cursorPosition()
-	if a.helpVisible && (action.InfoBar == nil || !action.InfoBar.HasPrompt) {
-		cursorVisible = false
-	}
 	screen.Screen = terminal
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
@@ -305,6 +285,18 @@ func (a *App) cursorPosition() (x, y int, visible bool) {
 		infoWindow.Resize(a.cols, row)
 		x = infoWindow.PromptCursorColumn()
 		return x, row, row >= 0
+	}
+	if a.helpVisible && a.helpPane != nil && a.helpWindow != nil {
+		loc := a.helpPane.Cursor.Loc
+		visual := a.helpWindow.VLocFromLoc(loc)
+		position := a.helpWindow.SLocFromLoc(loc)
+		current := a.helpWindow.StartLine
+		row := 0
+		for current.LessThan(position) && row <= a.rows {
+			current = a.helpWindow.Scroll(current, 1)
+			row++
+		}
+		return a.helpWindow.BufView().X + visual.VisualX - a.helpWindow.StartCol, row, row >= 0 && row < a.rows
 	}
 	p := a.focusedPane()
 	loc := p.h.Cursor.Loc

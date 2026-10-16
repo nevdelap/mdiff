@@ -29,7 +29,7 @@ func initMicroLua(app *App) {
 		case "micro/buffer":
 			return luaImportMicroBuffer()
 		case "micro/config":
-			return luaImportMicroConfig()
+			return luaImportMicroConfig(app)
 		case "micro/util":
 			return luaImportMicroUtil()
 		default:
@@ -46,6 +46,9 @@ func luaImportMicro(app *App) *lua.LTable {
 	ulua.L.SetField(pkg, "Log", luar.New(ulua.L, log.Println))
 	ulua.L.SetField(pkg, "SetStatusInfoFn", luar.New(ulua.L, display.SetStatusInfoFnLua))
 	ulua.L.SetField(pkg, "CurPane", luar.New(ulua.L, func() *action.BufPane {
+		if app.helpVisible && app.helpPane != nil {
+			return app.helpPane
+		}
 		if app.focusedPane() == nil {
 			return nil
 		}
@@ -64,13 +67,13 @@ func luaImportMicro(app *App) *lua.LTable {
 	return pkg
 }
 
-func luaImportMicroConfig() *lua.LTable {
+func luaImportMicroConfig(app *App) *lua.LTable {
 	pkg := ulua.L.NewTable()
 	for name, fn := range map[string]any{
 		"MakeCommand": action.MakeCommand, "FileComplete": buffer.FileComplete,
 		"HelpComplete": action.HelpComplete, "OptionComplete": action.OptionComplete,
 		"OptionValueComplete": action.OptionValueComplete, "TryBindKey": action.TryBindKeyPlug,
-		"Reload": action.ReloadConfig, "AddRuntimeFileFromMemory": config.PluginAddRuntimeFileFromMemory,
+		"Reload": app.rejectPluginReload, "AddRuntimeFileFromMemory": config.PluginAddRuntimeFileFromMemory,
 		"AddRuntimeFilesFromDirectory": config.PluginAddRuntimeFilesFromDirectory,
 		"AddRuntimeFile":               config.PluginAddRuntimeFile, "ListRuntimeFiles": config.PluginListRuntimeFiles,
 		"ReadRuntimeFile": config.PluginReadRuntimeFile, "NewRTFiletype": config.NewRTFiletype,

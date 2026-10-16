@@ -208,7 +208,7 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 			t.Errorf("menu row %q does not contain %q", row2, label)
 		}
 	}
-	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.5") {
+	if !strings.HasSuffix(strings.TrimRight(row1, " "), "Left") || !strings.HasSuffix(strings.TrimRight(row2, " "), "mdiff (wrapping micro) v0.0.6") {
 		t.Fatalf("right-aligned menu indicators missing: row1=%q row2=%q", row1, row2)
 	}
 	app.handle(key(tcell.KeyCtrlW, 0, tcell.ModCtrl))
@@ -251,7 +251,7 @@ func TestShortcutBarHelpCommandAndRejectedActions(t *testing.T) {
 	if !app.helpVisible || app.helpTopic != "help" {
 		t.Fatalf("Ctrl+G did not show Micro help: visible=%t topic=%q", app.helpVisible, app.helpTopic)
 	}
-	app.handle(key(tcell.KeyEscape, 0, tcell.ModNone))
+	app.handle(key(tcell.KeyCtrlG, 0, tcell.ModCtrl))
 	app.left.buf.Insert(buffer.Loc{X: 0, Y: 0}, "memory")
 	before := string(app.left.buf.Bytes())
 	rightName := app.right.buf.GetName()

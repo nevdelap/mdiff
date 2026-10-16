@@ -34,6 +34,28 @@ func (a *App) requestQuit() bool {
 	return a.quitComplete
 }
 
+// requestQuitAll preserves Micro's one-prompt discard-all operation.
+func (a *App) requestQuitAll() bool {
+	if a.quitFlow != nil {
+		return false
+	}
+	dirty := false
+	for _, p := range a.panes() {
+		dirty = dirty || p.buf.Modified()
+	}
+	if !dirty {
+		a.quitComplete = true
+		return true
+	}
+	a.quitComplete = false
+	action.InfoBar.YNPrompt("Quit micro? (all open buffers will be closed without saving)", func(yes, canceled bool) {
+		if yes && !canceled {
+			a.quitComplete = true
+		}
+	})
+	return a.quitComplete
+}
+
 func (a *App) panePromptName(p *pane) string {
 	return fmt.Sprintf("%s (%s)", filepath.Base(p.buf.GetName()), a.paneSideName(p))
 }
@@ -135,7 +157,6 @@ func (a *App) syncPaneBuffer(p *pane) {
 	}
 	p.buf = p.h.Buf
 	p.statusView.Buf = p.buf
-	p.buf.Settings["scrollbar"] = false
 	p.buf.Settings["diffgutter"] = false
 	side := viewport.Left
 	if p == &a.right {

@@ -1,6 +1,7 @@
 package prototype
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/micro-editor/tcell/v2"
 	"github.com/nevdelap/mdiff/internal/compare"
+	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/display"
 	"github.com/nevdelap/mdiff/internal/viewport"
@@ -163,6 +165,56 @@ func TestSimulationEditingAlignmentScrollResize(t *testing.T) {
 
 	app.Close()
 	assertNoUnexpectedPersistedState(t, configDir)
+}
+
+func TestLargeGotoAndSearchUseMicroViewportStart(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		spacer bool
+		search bool
+	}{
+		{"goto_equal", false, false},
+		{"search_equal", false, true},
+		{"goto_with_spacer", true, false},
+		{"search_with_spacer", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _ := newEditingTestApp(t, 70, 10)
+			defer app.Close()
+			lines := make([]string, 100)
+			for i := range lines {
+				lines[i] = fmt.Sprintf("line-%03d", i+1)
+			}
+			lines[80] = "unique-target"
+			contents := strings.Join(lines, "\n")
+			app.left.buf.Insert(buffer.Loc{}, contents)
+			app.right.buf.Insert(buffer.Loc{}, contents)
+			if tc.spacer {
+				app.right.buf.Insert(buffer.Loc{Y: 20}, "right-only\n")
+			}
+			app.rebuildWithAnchor(anchor{})
+			app.left.h.GotoLoc(buffer.Loc{})
+			app.focus = viewport.Left
+			app.setFocus()
+			if tc.search {
+				app.left.buf.LastSearch = "unique-target"
+				app.left.buf.HighlightSearch = true
+				action.BindKey("F6", "FindNext", action.BufMapEvent)
+				app.handle(key(tcell.KeyF6, 0, tcell.ModNone))
+			} else {
+				app.runMicroCommand(app.left.h, "goto 81")
+			}
+			start := app.left.view.StartLine
+			want := app.layout.CursorRow(viewport.Left, start.Line, start.Row)
+			if want < 0 || app.top != want {
+				t.Fatalf("shared top=%d; want Micro StartLine %v mapped to row %d (cursor=%v)", app.top, start, want, app.left.h.Cursor.Loc)
+			}
+			cursorRow := app.layout.CursorRow(viewport.Left, app.left.h.Cursor.Y, app.left.view.VLocFromLoc(app.left.h.Cursor.Loc).Row)
+			if cursorRow < app.top || cursorRow >= app.top+app.rows {
+				t.Fatalf("cursor row %d is outside requested Micro viewport [%d,%d)", cursorRow, app.top, app.top+app.rows)
+			}
+		})
+	}
 }
 
 func flushDiffForTest(t *testing.T, app *App) {
@@ -390,6 +442,7 @@ func TestDiffNavigationMovesBetweenDistinctHunksInBothDirections(t *testing.T) {
 	app.rebuildWithAnchor(anchor{})
 	app.focus = viewport.Left
 	app.setFocus()
+	app.left.h.GotoLoc(buffer.Loc{X: 0, Y: 0})
 	app.top = 0
 	app.handle(tcell.NewEventKey(tcell.KeyRune, ']', tcell.ModAlt, ""))
 	first := app.top
@@ -403,8 +456,102 @@ func TestDiffNavigationMovesBetweenDistinctHunksInBothDirections(t *testing.T) {
 		t.Fatalf("previous-difference viewport = %d, want first hunk at %d", app.top, first)
 	}
 	app.handle(tcell.NewEventKey(tcell.KeyRune, '[', tcell.ModAlt, ""))
-	if app.top != first {
-		t.Fatalf("previous-difference at first hunk moved to %d, want stable position %d", app.top, first)
+	if app.top != 0 {
+		t.Fatalf("previous-difference fallback moved to %d, want Micro's CursorStart position 0", app.top)
+	}
+}
+
+func TestDiffNavigationUsesFocusedCursorAfterScrollingNearFinalHunk(t *testing.T) {
+	app, _ := newEditingTestApp(t, 48, 10)
+	defer app.Close()
+	var left, right strings.Builder
+	for i := 0; i < 32; i++ {
+		fmt.Fprintf(&left, "line %02d\n", i)
+		text := fmt.Sprintf("line %02d\n", i)
+		if i == 29 {
+			text = "changed\n"
+		}
+		right.WriteString(text)
+	}
+	app.left.buf.Insert(buffer.Loc{}, left.String())
+	app.right.buf.Insert(buffer.Loc{}, right.String())
+	app.rebuildWithAnchor(anchor{})
+	app.focus = viewport.Right
+	app.setFocus()
+	app.right.h.GotoLoc(buffer.Loc{X: 0, Y: 1})
+	app.top = max(0, len(app.layout.Rows)-app.rows)
+	app.handle(key(tcell.KeyRune, ']', tcell.ModAlt))
+	if app.right.h.Cursor.Y < 28 || app.top < 20 {
+		t.Fatalf("navigation ignored focused cursor/final hunk: cursor=%v top=%d", app.right.h.Cursor.Loc, app.top)
+	}
+	selectedLine := app.right.h.Cursor.Y
+	app.handle(key(tcell.KeyRune, ']', tcell.ModAlt))
+	if app.right.h.Cursor.Y == selectedLine {
+		t.Fatal("DiffNext repeated the final hunk instead of falling through")
+	}
+}
+
+func TestDiffNavigationAdvancesPastOneSidedBoundaryHunks(t *testing.T) {
+	cases := []struct {
+		name, left, right string
+		focus             viewport.Side
+		cursor            buffer.Loc
+		direction         int
+	}{
+		{"trailing-focused-side-missing", "a\nb", "a\nb\nright-only", viewport.Left, buffer.Loc{Y: 1}, 1},
+		{"trailing-focused-side-present", "a\nb", "a\nb\nright-only", viewport.Right, buffer.Loc{Y: 0}, 1},
+		{"leading-focused-side-missing", "left-only\na\nb", "a\nb", viewport.Right, buffer.Loc{Y: 1}, -1},
+		{"leading-focused-side-present", "left-only\na\nb", "a\nb", viewport.Left, buffer.Loc{Y: 2}, -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			app, _ := newEditingTestApp(t, 48, 10)
+			defer app.Close()
+			app.left.buf.Insert(buffer.Loc{}, tc.left)
+			app.right.buf.Insert(buffer.Loc{}, tc.right)
+			app.rebuildWithAnchor(anchor{})
+			app.focus = tc.focus
+			app.setFocus()
+			app.focusedPane().h.GotoLoc(tc.cursor)
+			if !app.jumpDiff(tc.direction) {
+				t.Fatal("first navigation did not find the boundary hunk")
+			}
+			if app.jumpDiff(tc.direction) {
+				t.Fatal("repeated navigation selected the same boundary hunk")
+			}
+		})
+	}
+}
+
+func TestDiffNavigationResetsAfterPluginReplacesBuffer(t *testing.T) {
+	app, _ := newEditingTestApp(t, 48, 10)
+	defer app.Close()
+	app.left.buf.Insert(buffer.Loc{}, "base\nfirst\nbase\nsecond\nend")
+	app.right.buf.Insert(buffer.Loc{}, "changed\nfirst\nbase\nsecond\nend")
+	app.rebuildWithAnchor(anchor{})
+	app.focus = viewport.Right
+	app.setFocus()
+	app.right.h.GotoLoc(buffer.Loc{Y: 1})
+	if !app.jumpDiff(-1) {
+		t.Fatal("could not establish navigation state on old buffer")
+	}
+
+	// Simulate a plugin replacing the focused Micro buffer and the timer path
+	// synchronizing that replacement without a command-mode action.
+	replacement := buffer.NewBufferFromString("base\nchanged\nbase\nsecond\nmore", "replacement", buffer.BTDefault)
+	app.right.h.OpenBuffer(replacement)
+	app.syncChangedBuffers()
+	app.focus = viewport.Right
+	app.setFocus()
+	app.focusedPane().h.GotoLoc(buffer.Loc{})
+	if !app.jumpDiff(1) {
+		t.Fatal("DiffNext did not find a hunk after buffer replacement")
+	}
+	if got := app.layout.RowFor(viewport.Right, app.right.h.Cursor.Y); got < 0 || got >= len(app.layout.Rows) {
+		t.Fatalf("replacement cursor has invalid aligned row %d", got)
+	}
+	if app.right.h.Cursor.Y != 1 {
+		t.Fatalf("stale navigation state skipped first replacement hunk: cursor=%v top=%d", app.right.h.Cursor.Loc, app.top)
 	}
 }
 

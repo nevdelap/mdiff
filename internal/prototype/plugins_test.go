@@ -11,6 +11,7 @@ import (
 	"github.com/nevdelap/mdiff/internal/micro/action"
 	"github.com/nevdelap/mdiff/internal/micro/buffer"
 	"github.com/nevdelap/mdiff/internal/micro/config"
+	ulua "github.com/nevdelap/mdiff/internal/micro/lua"
 	"github.com/nevdelap/mdiff/internal/viewport"
 )
 
@@ -66,8 +67,8 @@ end
 
 function onRune(bp, r)
     if r == "!" then
-        if micro.CurPane().Buf ~= bp.Buf then
-            error("CurPane did not follow mdiff focus")
+        if micro.CurPane().Buf ~= bp.Buf or micro.CurTab():CurPane().Buf ~= bp.Buf then
+            error("current pane APIs did not follow the visible pane")
         end
         bp.Buf:Insert(-bp.Cursor.Loc, "plugin")
     end
@@ -75,8 +76,8 @@ function onRune(bp, r)
 end
 
 function onKey(bp)
-    if micro.CurPane().Buf ~= bp.Buf then
-        error("configured Lua action did not target the focused pane")
+    if micro.CurPane().Buf ~= bp.Buf or micro.CurTab():CurPane().Buf ~= bp.Buf then
+        error("current pane APIs did not follow the visible pane")
     end
     bp.Buf:Insert(-bp.Cursor.Loc, "bound")
     return true
@@ -150,6 +151,36 @@ end
 	flushDiffForTest(t, app)
 	if app.displayedLeft[0] == app.displayedRight[0] {
 		t.Fatal("plugin edit did not update the installed diff snapshot")
+	}
+	original := app.focusedPane().h
+	app.runMicroCommand(original, "help commands")
+	if app.microTab.CurPane() != app.helpPane {
+		t.Fatal("Micro tab did not report the visible help pane")
+	}
+	diagnostics := len(config.Diagnostics)
+	app.handle(key(tcell.KeyCtrlR, 0, tcell.ModCtrl))
+	if len(config.Diagnostics) != diagnostics {
+		t.Fatalf("help plugin callback disagreed with Micro current-pane APIs: %q", config.Diagnostics[diagnostics:])
+	}
+	app.handle(key(tcell.KeyCtrlG, 0, tcell.ModCtrl))
+	if app.helpVisible || app.microTab.CurPane() != original {
+		t.Fatal("closing help did not restore the original Micro current pane")
+	}
+}
+
+func TestPluginReloadUsesMdiffReloadGuard(t *testing.T) {
+	app, _ := newEditingTestApp(t, 60, 12)
+	defer app.Close()
+	before := app.left.buf.Settings["softwrap"]
+	ulua.L.SetGlobal("mdiff_test_config", luaImportMicroConfig(app))
+	if err := ulua.L.DoString(`mdiff_test_config.Reload()`); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(app.currentStatus(), "Command unavailable in mdiff: reload") {
+		t.Fatalf("plugin reload was not rejected visibly: %q", app.currentStatus())
+	}
+	if app.left.buf.Settings["softwrap"] != before || len(action.Tabs.List) != 1 {
+		t.Fatal("plugin reload changed pane settings or Micro layout")
 	}
 }
 
