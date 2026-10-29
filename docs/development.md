@@ -8,7 +8,7 @@
 - Docker for Markdown linting
 - `yamlfmt` and `yamllint` containers for workflow YAML quality checks
 - `golangci-lint` v2.14.0 for Go linting
-- Go 1.26.9 for the pinned vulnerability audit
+- Go 1.26.10 for the pinned vulnerability audit
 
 Install Go dependencies with:
 
@@ -118,7 +118,7 @@ run `just check` and `just audit`; inspect both module files and the license
 report before handoff. `just audit` installs the pinned govulncheck v1.1.4 and
 go-licenses v2.0.1 tools into `/tmp/mdiff-audit-tools`, checks reachable
 vulnerabilities and forbidden or unknown dependency licenses, and prints a
-license inventory. It uses Go 1.26.9 so the audit itself does not run against
+license inventory. It uses Go 1.26.10 so the audit itself does not run against
 the vulnerable Go 1.26.8 standard library. The Go source minimum remains the
 version in `go.mod`.
 
