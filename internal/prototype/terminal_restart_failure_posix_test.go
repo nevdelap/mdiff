@@ -3,6 +3,7 @@
 package prototype
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -57,15 +58,27 @@ func TestTerminalHandoffRealRestartFailureRestoresModes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestTerminalHandoffRealRestartFailureRestoresModes$")
+	var childStderr *bytes.Buffer
+	if runtime.GOOS != "darwin" {
+		childStderr = &bytes.Buffer{}
+	}
 	child.Env = append(os.Environ(), "MDIFF_TEST_REAL_RESTART_FAILURE=1", "TERM=xterm-256color")
-	child.Stdin, child.Stdout, child.Stderr = slave, slave, slave
+	child.Stdin, child.Stdout = slave, slave
+	if childStderr == nil {
+		child.Stderr = slave
+	} else {
+		child.Stderr = childStderr
+	}
 	child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := child.Run(); ctx.Err() == context.DeadlineExceeded && runtime.GOOS == "darwin" {
 		// The pinned tcell Darwin poller can block opening /dev/tty from a
 		// detached session. Bound this failure-path probe on that platform.
 		t.Skip("Darwin tcell poller blocked opening /dev/tty without a controlling terminal")
 	} else if err != nil {
-		t.Fatalf("real restart failure subprocess: %v", err)
+		if childStderr == nil {
+			t.Fatalf("real restart failure subprocess: %v", err)
+		}
+		t.Fatalf("real restart failure subprocess: %v\nchild stderr:\n%s", err, childStderr.String())
 	}
 	after, err := term.GetState(int(slave.Fd()))
 	if err != nil {
