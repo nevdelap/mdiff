@@ -15,7 +15,7 @@ require (
 	github.com/yuin/gopher-lua v1.1.2
 	github.com/zyedidia/clipper v0.1.1
 	github.com/zyedidia/glob v0.0.0-20170209203856-dd4023a66dc3
-	golang.org/x/term v0.47.0
+	golang.org/x/term v0.48.0
 	golang.org/x/text v0.44.0
 	gopkg.in/yaml.v2 v2.4.0
 	layeh.com/gopher-luar v1.0.11
@@ -28,7 +28,7 @@ require (
 	github.com/npat-efault/poller v2.0.0+incompatible // indirect
 	github.com/zyedidia/poller v2.0.0+incompatible // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/sys v0.49.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
 )
 
 replace github.com/kballard/go-shellquote => github.com/micro-editor/go-shellquote v0.0.0-20250101105543-feb6c39314f5
